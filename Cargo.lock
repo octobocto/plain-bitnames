@@ -4899,6 +4899,7 @@ dependencies = [
  "bitcoin",
  "blake3",
  "clap",
+ "const-hex",
  "dotenvy",
  "futures",
  "jsonrpsee",
