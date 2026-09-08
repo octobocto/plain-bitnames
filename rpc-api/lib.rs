@@ -29,7 +29,8 @@ pub mod node {
     use plain_bitnames_types::{
         Address, Authorization, Authorized, BatchIcannRegistrationData,
         BitNameData, BitNameDataUpdates, BitNameSeqId, BitcoinOutputContent,
-        Block, BlockHash, BlockIndex, Body, EncryptionPubKey, FilledOutput,
+        Block, BlockHash, BlockIndex, BlockIndexDeposit, BlockIndexSpend,
+        BlockIndexTx, Body, EncryptionPubKey, FilledOutput,
         FilledOutputContent, Header, InPoint, M6id, MempoolTx, MerkleRoot,
         MutableBitNameData, OutPoint, Output, OutputContent, PointedOutput,
         SpentOutput, Transaction, TransactionData, TxIn, Txid, VerifyingKey,
@@ -84,13 +85,14 @@ pub mod node {
     #[open_api(ref_schemas[
         Address, Authorization, BatchIcannRegistrationData,
         BitcoinOutputContent, BitName, BitNameDataUpdates, BitNameSeqId,
-        BlockHash, Body, EncryptionPubKey, FilledOutput, FilledOutputContent,
-        Header, InPoint, M6id, MerkleRoot, MutableBitNameData, OutPoint,
-        Output, OutputContent, PeerConnectionStatus, Signature, SpentOutput,
-        Transaction, TransactionData, Txid, TxIn, VerifyingKey,
-        WithdrawalOutputContent, bitnames_schema::BitcoinAddr,
-        bitnames_schema::BitcoinBlockHash, bitnames_schema::BitcoinOutPoint,
-        bitnames_schema::BitcoinTransaction, bitnames_schema::SocketAddr,
+        BlockHash, BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, Body,
+        EncryptionPubKey, FilledOutput, FilledOutputContent, Header, InPoint,
+        M6id, MerkleRoot, MutableBitNameData, OutPoint, Output, OutputContent,
+        PeerConnectionStatus, Signature, SpentOutput, Transaction,
+        TransactionData, Txid, TxIn, VerifyingKey, WithdrawalOutputContent,
+        bitnames_schema::BitcoinAddr, bitnames_schema::BitcoinBlockHash,
+        bitnames_schema::BitcoinOutPoint, bitnames_schema::BitcoinTransaction,
+        bitnames_schema::SocketAddr,
     ])]
     #[rpc(client, server, server_bounds(Self: open_api::RpcServer))]
     pub trait Rpc {
