@@ -47,6 +47,9 @@ url = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
+[dev-dependencies]
+reserve-port = { workspace = true }
+
 [dependencies.eframe]
 workspace = true
 features = ["glow", "wayland", "web_screen_reader", "x11"]
