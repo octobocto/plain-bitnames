@@ -127,6 +127,8 @@ pub enum Error {
     NoBitnameReservation { plain_name: String },
     #[error("not enough funds")]
     NotEnoughFunds,
+    #[error("no transfer destination")]
+    NoTransferDestination,
     #[error("utxo does not exist")]
     NoUtxo,
     #[error("failed to parse mnemonic seed phrase")]

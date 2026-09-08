@@ -278,7 +278,7 @@ pub mod wallet {
         authorization::{Dst, Signature},
         hashes::BitName,
         schema as bitnames_schema,
-        wallet::Balance,
+        wallet::{Balance, TransferDests},
     };
     use serde::{Deserialize, Serialize};
     use utoipa::ToSchema;
@@ -332,6 +332,15 @@ pub mod wallet {
             value_sats: u64,
             fee_sats: u64,
             memo: Option<String>,
+        ) -> RpcResult<Txid>;
+
+        /// Create a tx that transfers funds to each address in `dests`,
+        /// which maps an address to a value in sats
+        #[method(name = "create_transfer_many")]
+        async fn create_transfer_many(
+            &self,
+            dests: TransferDests,
+            fee_sats: u64,
         ) -> RpcResult<Txid>;
 
         /// Creates a tx that initiates a withdrawal to the specified mainchain
