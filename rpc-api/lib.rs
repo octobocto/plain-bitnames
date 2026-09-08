@@ -29,7 +29,7 @@ pub mod node {
     use plain_bitnames_types::{
         Address, Authorization, Authorized, BatchIcannRegistrationData,
         BitNameData, BitNameDataUpdates, BitNameSeqId, BitcoinOutputContent,
-        Block, BlockHash, Body, EncryptionPubKey, FilledOutput,
+        Block, BlockHash, BlockIndex, Body, EncryptionPubKey, FilledOutput,
         FilledOutputContent, Header, InPoint, M6id, MerkleRoot,
         MutableBitNameData, OutPoint, Output, OutputContent, PointedOutput,
         SpentOutput, Transaction, TransactionData, TxIn, Txid, VerifyingKey,
@@ -126,6 +126,26 @@ pub mod node {
         #[open_api_method(output_schema(ToSchema))]
         #[method(name = "get_block")]
         async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block>;
+
+        /// Get the block hash at the specified height in the current chain,
+        /// if it exists
+        #[open_api_method(output_schema(
+            PartialSchema = "schema::Optional<BlockHash>"
+        ))]
+        #[method(name = "get_block_hash")]
+        async fn get_block_hash(
+            &self,
+            height: u32,
+        ) -> RpcResult<Option<BlockHash>>;
+
+        /// Get the transaction ids, sizes and encodings of a block, with the
+        /// mainchain deposits and withdrawal bundle spends it applied
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "get_block_index")]
+        async fn get_block_index(
+            &self,
+            block_hash: BlockHash,
+        ) -> RpcResult<BlockIndex>;
 
         /// Get mainchain blocks that commit to a specified block hash
         #[open_api_method(output_schema(

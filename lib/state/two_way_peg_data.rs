@@ -12,10 +12,11 @@ use crate::{
         rollback::{HeightStamped, RollBack},
     },
     types::{
-        AggregatedWithdrawal, AmountOverflowError, FilledOutput,
-        FilledOutputContent, InPoint, M6id, OutPoint, OutPointKey, SpentOutput,
-        WithdrawalBundle, WithdrawalBundleEvent, WithdrawalBundleEventStatus,
-        WithdrawalBundleStatus, WithdrawalOutputContent,
+        AggregatedWithdrawal, AmountOverflowError, BlockIndexEvents,
+        FilledOutput, FilledOutputContent, InPoint, M6id, OutPoint,
+        OutPointKey, SpentOutput, WithdrawalBundle, WithdrawalBundleEvent,
+        WithdrawalBundleEventStatus, WithdrawalBundleStatus,
+        WithdrawalOutputContent,
         proto::mainchain::{BlockEvent, TwoWayPegData},
     },
 };
@@ -124,6 +125,7 @@ fn connect_withdrawal_bundle_submitted(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
+    index_events: &mut BlockIndexEvents,
     event_block_hash: &bitcoin::BlockHash,
     m6id: M6id,
 ) -> Result<(), error::ConnectWithdrawalBundleSubmitted> {
@@ -161,6 +163,7 @@ fn connect_withdrawal_bundle_submitted(
                 inpoint: InPoint::Withdrawal { m6id },
             };
             state.stxos.put(rwtxn, &key, &spent_output)?;
+            index_events.bundle_spends.push((*outpoint, m6id));
         }
         assert_eq!(
             bundle_status.latest().value,
@@ -461,6 +464,7 @@ fn connect_withdrawal_bundle_event(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
+    index_events: &mut BlockIndexEvents,
     event_block_hash: &bitcoin::BlockHash,
     event: &WithdrawalBundleEvent,
 ) -> Result<(), Error> {
@@ -470,6 +474,7 @@ fn connect_withdrawal_bundle_event(
                 state,
                 rwtxn,
                 block_height,
+                index_events,
                 event_block_hash,
                 event.m6id,
             )
@@ -495,10 +500,12 @@ fn connect_withdrawal_bundle_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn connect_2wpd_event(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
+    index_events: &mut BlockIndexEvents,
     latest_deposit_block_hash: &mut Option<bitcoin::BlockHash>,
     latest_withdrawal_bundle_event_block_hash: &mut Option<bitcoin::BlockHash>,
     event_block_hash: bitcoin::BlockHash,
@@ -511,6 +518,7 @@ fn connect_2wpd_event(
             state
                 .utxos
                 .put(rwtxn, &OutPointKey::from(&outpoint), &output)?;
+            index_events.deposits.push((outpoint, output));
             *latest_deposit_block_hash = Some(event_block_hash);
         }
         BlockEvent::WithdrawalBundle(withdrawal_bundle_event) => {
@@ -518,6 +526,7 @@ fn connect_2wpd_event(
                 state,
                 rwtxn,
                 block_height,
+                index_events,
                 &event_block_hash,
                 withdrawal_bundle_event,
             )?;
@@ -535,6 +544,7 @@ pub fn connect(
     let block_height = state.try_get_height(rwtxn)?.ok_or(Error::NoTip)?;
     tracing::trace!(%block_height, "Connecting 2WPD...");
     // Handle deposits.
+    let mut index_events = BlockIndexEvents::default();
     let mut latest_deposit_block_hash = None;
     let mut latest_withdrawal_bundle_event_block_hash = None;
     for (event_block_hash, event_block_info) in &two_way_peg_data.block_info {
@@ -543,12 +553,20 @@ pub fn connect(
                 state,
                 rwtxn,
                 block_height,
+                &mut index_events,
                 &mut latest_deposit_block_hash,
                 &mut latest_withdrawal_bundle_event_block_hash,
                 *event_block_hash,
                 event,
             )?;
         }
+    }
+    // Record what this block moved outside its body. An address index cannot
+    // see a deposit or a bundle spend any other way.
+    if !index_events.is_empty() {
+        state
+            .block_index_events
+            .put(rwtxn, &block_height, &index_events)?;
     }
     // Handle deposits.
     if let Some(latest_deposit_block_hash) = latest_deposit_block_hash {
@@ -912,6 +930,7 @@ pub fn disconnect(
         .expect("Height should not be None");
     let mut latest_deposit_block_hash = None;
     let mut latest_withdrawal_bundle_event_block_hash = None;
+    state.block_index_events.delete(rwtxn, &block_height)?;
     // Restore pending withdrawal bundle
     for (event_block_hash, event_block_info) in
         two_way_peg_data.block_info.iter().rev()

@@ -13,10 +13,10 @@ use crate::{
     authorization::{self, Authorization},
     types::{
         Address, AmountOverflowError, Authorized, AuthorizedTransaction,
-        BlockHash, Body, FilledOutput, FilledTransaction, GetAddress as _,
-        GetValue as _, Header, InPoint, M6id, MerkleRoot, OutPoint,
-        OutPointKey, SpentOutput, Transaction, VERSION, Verify as _, Version,
-        WithdrawalBundle, WithdrawalBundleStatus, constants, hashes,
+        BlockHash, BlockIndexEvents, Body, FilledOutput, FilledTransaction,
+        GetAddress as _, GetValue as _, Header, InPoint, M6id, MerkleRoot,
+        OutPoint, OutPointKey, SpentOutput, Transaction, VERSION, Verify as _,
+        Version, WithdrawalBundle, WithdrawalBundleStatus, constants, hashes,
         proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
@@ -83,6 +83,10 @@ pub struct State {
     /// Some withdrawal bundles may be unknown.
     /// in which case they are `None`.
     withdrawal_bundles: WithdrawalBundlesDb,
+    /// Coin movements that no block body carries, keyed by the height that
+    /// applied them
+    block_index_events:
+        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BlockIndexEvents>>,
     /// deposit blocks and the height at which they were applied, keyed sequentially
     deposit_blocks: DatabaseUnique<
         SerdeBincode<u32>,
@@ -97,7 +101,7 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = bitnames::Dbs::NUM_DBS + 10;
+    pub const NUM_DBS: u32 = bitnames::Dbs::NUM_DBS + 11;
 
     pub fn new<Tls>(env: &sneed::Env<Tls>) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -118,6 +122,8 @@ impl State {
         )?;
         let withdrawal_bundles =
             DatabaseUnique::create(env, &mut rwtxn, "withdrawal_bundles")?;
+        let block_index_events =
+            DatabaseUnique::create(env, &mut rwtxn, "block_index_events")?;
         let deposit_blocks =
             DatabaseUnique::create(env, &mut rwtxn, "deposit_blocks")?;
         let withdrawal_bundle_event_blocks = DatabaseUnique::create(
@@ -139,6 +145,7 @@ impl State {
             pending_withdrawal_bundle,
             latest_failed_withdrawal_bundle,
             withdrawal_bundles,
+            block_index_events,
             withdrawal_bundle_event_blocks,
             deposit_blocks,
             _version: version,
@@ -171,6 +178,19 @@ impl State {
         SerdeBincode<(bitcoin::BlockHash, u32)>,
     > {
         &self.withdrawal_bundle_event_blocks
+    }
+
+    /// Coin movements that the block at this height applied outside its body.
+    pub fn get_block_index_events(
+        &self,
+        rotxn: &RoTxn,
+        height: u32,
+    ) -> Result<BlockIndexEvents, Error> {
+        let events = self
+            .block_index_events
+            .try_get(rotxn, &height)?
+            .unwrap_or_default();
+        Ok(events)
     }
 
     pub fn try_get_tip(
@@ -723,11 +743,11 @@ mod test {
         authorization,
         state::{Error, State, error},
         types::{
-            Address, AuthorizedTransaction, BitName, FilledOutput,
-            FilledOutputContent, FilledTransaction, Hash, InPoint,
-            MutableBitNameData, OutPoint, OutPointKey, Output, OutputContent,
-            SpentOutput, Transaction, TxData, Txid, VerifyingKey,
-            WithdrawalOutputContent,
+            Address, AuthorizedTransaction, BitName, BlockIndexEvents,
+            FilledOutput, FilledOutputContent, FilledTransaction, Hash,
+            InPoint, M6id, MutableBitNameData, OutPoint, OutPointKey, Output,
+            OutputContent, SpentOutput, Transaction, TxData, Txid,
+            VerifyingKey, WithdrawalOutputContent,
         },
     };
 
@@ -1029,6 +1049,59 @@ mod test {
             expected_sidechain_wealth,
             sidechain_wealth,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn block_index_events_round_trip() -> anyhow::Result<()> {
+        let (_temp_dir, env, state) = fresh_state("block-index-events")?;
+        let deposit_outpoint = |byte: u8| {
+            OutPoint::Deposit(bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([byte; 32]),
+                vout: 0,
+            })
+        };
+        let events = BlockIndexEvents {
+            deposits: vec![(
+                deposit_outpoint(1),
+                bitcoin_filled_output(Address::ALL_ZEROS, 5000),
+            )],
+            bundle_spends: vec![(
+                deposit_outpoint(2),
+                M6id(bitcoin::Txid::from_byte_array([3; 32])),
+            )],
+        };
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.put(&mut rwtxn, &7, &events)?;
+            rwtxn.commit()?;
+        }
+        {
+            let rotxn = env.read_txn()?;
+            anyhow::ensure!(state.get_block_index_events(&rotxn, 7)? == events);
+            // A height that moved nothing outside its body reads as empty.
+            anyhow::ensure!(
+                state.get_block_index_events(&rotxn, 8)?.is_empty()
+            );
+        }
+
+        // A disconnect drops the events, so a reorg leaves nothing behind for
+        // the block that takes the height.
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.delete(&mut rwtxn, &7)?;
+            rwtxn.commit()?;
+        }
+        let rotxn = env.read_txn()?;
+        anyhow::ensure!(state.get_block_index_events(&rotxn, 7)?.is_empty());
+
+        // A height that moved nothing writes no row, so deleting it again is
+        // still safe.
+        {
+            let mut rwtxn = env.write_txn()?;
+            state.block_index_events.delete(&mut rwtxn, &8)?;
+            rwtxn.commit()?;
+        }
         Ok(())
     }
 }

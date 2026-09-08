@@ -174,6 +174,54 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         Ok(Some(block_hash))
     }
 
+    async fn get_block_hash(
+        &self,
+        height: u32,
+    ) -> RpcResult<Option<BlockHash>> {
+        self.app.node.try_get_block_hash(height).map_err(custom_err)
+    }
+
+    async fn get_block_index(
+        &self,
+        block_hash: BlockHash,
+    ) -> RpcResult<plain_bitnames::types::BlockIndex> {
+        let body = self.app.node.get_body(block_hash).map_err(custom_err)?;
+        let txs = body
+            .transactions
+            .iter()
+            .map(|tx| plain_bitnames::types::BlockIndexTx {
+                txid: tx.txid(),
+                size: tx.canonical_size(),
+                raw: const_hex::encode(tx.canonical_encoding()),
+            })
+            .collect();
+        let events = self
+            .app
+            .node
+            .get_block_index_events(block_hash)
+            .map_err(custom_err)?;
+        Ok(plain_bitnames::types::BlockIndex {
+            txs,
+            deposits: events
+                .deposits
+                .into_iter()
+                .map(|(outpoint, output)| {
+                    plain_bitnames::types::BlockIndexDeposit {
+                        outpoint,
+                        output,
+                    }
+                })
+                .collect(),
+            bundle_spends: events
+                .bundle_spends
+                .into_iter()
+                .map(|(outpoint, m6id)| {
+                    plain_bitnames::types::BlockIndexSpend { outpoint, m6id }
+                })
+                .collect(),
+        })
+    }
+
     async fn get_bmm_inclusions(
         &self,
         block_hash: plain_bitnames::types::BlockHash,
