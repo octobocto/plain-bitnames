@@ -197,7 +197,9 @@ jobs:
             name: x86_64-unknown-linux-gnu
             binary-suffix: ""
             rustflags: ""
-          - os: macos-latest-large
+          # An Apple Silicon runner cross-compiles this target, and the
+          # larger Intel runner is not available on every account.
+          - os: macos-latest
             name: x86_64-apple-darwin
             binary-suffix: ""
             rustflags: ""
@@ -250,15 +252,30 @@ jobs:
             jq -er '.packages | map(select(.name == "plain_bitnames_app") | .version) | .[0]')
           BITNAMES_APP_FILENAME="bitnames-${BITNAMES_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
           BITNAMES_CLI_FILENAME="bitnames-cli-${BITNAMES_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          BITNAMES_ZIP_FILENAME="bitnames-${BITNAMES_APP_VERSION}-${{ matrix.name }}.zip"
           echo "BITNAMES_APP_VERSION=$BITNAMES_APP_VERSION" >> "$GITHUB_ENV"
           echo "BITNAMES_APP_FILENAME=$BITNAMES_APP_FILENAME" >> "$GITHUB_ENV"
           echo "BITNAMES_CLI_FILENAME=$BITNAMES_CLI_FILENAME" >> "$GITHUB_ENV"
+          echo "BITNAMES_ZIP_FILENAME=$BITNAMES_ZIP_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/${{ matrix.name }}/release/"
           ln -fs "plain_bitnames_app${{ matrix.binary-suffix }}" "${BITNAMES_APP_FILENAME}"
           ln -fs "plain_bitnames_app_cli${{ matrix.binary-suffix }}" "${BITNAMES_CLI_FILENAME}"
+          popd
+
+      - name: 'Pack the release zip'
+        # BitWindow downloads one archive per platform and takes the daemon and
+        # its CLI from it. The names inside are bare, which is what its
+        # extractor looks for.
+        run: |
+          pushd "target/${{ matrix.name }}/release/"
+          cp "plain_bitnames_app${{ matrix.binary-suffix }}" "bitnames${{ matrix.binary-suffix }}"
+          cp "plain_bitnames_app_cli${{ matrix.binary-suffix }}" "bitnames-cli${{ matrix.binary-suffix }}"
+          zip -j "${BITNAMES_ZIP_FILENAME}" \
+            "bitnames${{ matrix.binary-suffix }}" \
+            "bitnames-cli${{ matrix.binary-suffix }}"
           popd
 
       - name: 'Upload Artifacts (bitnames)'
@@ -290,69 +307,7 @@ jobs:
           files: |
             target/${{ matrix.name }}/release/${{ env.BITNAMES_APP_FILENAME }}
             target/${{ matrix.name }}/release/${{ env.BITNAMES_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.BITNAMES_ZIP_FILENAME }}
           fail_on_unmatched_files: true
           prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease != '' }}
 
-  parse-semver:
-    name: Parse version info
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    outputs:
-      prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease }}
-    steps:
-      - name: Extract Git tag name
-        id: git-tag-name
-        run: |
-          echo "git_tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Parse Git tag name as semver
-        uses: madhead/semver-utils@v5.0.0
-        id: parse-git-tag-name-semver
-        with:
-          version: ${{ steps.git-tag-name.outputs.git_tag_name }}
-
-  upload-releases-to-releases-drivechain-info:
-    name: Upload releases to releases.drivechain.info
-    runs-on: ubuntu-latest
-    needs: [integration-test, test-build-release, parse-semver]
-    if: startsWith(github.ref, 'refs/tags/') && needs.parse-semver.outputs.prerelease == ''
-    steps:
-      - name: Download release assets
-        uses: robinraju/release-downloader@v1.13
-        with:
-          fileName: '*'
-          tag: ${{ github.ref_name }}
-      
-      - name: Create zip files for releases.drivechain.info
-        run: |
-          shopt -s extglob
-          mv bitnames-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin bitnames-latest-x86_64-apple-darwin
-          mv bitnames-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-apple-darwin bitnames-cli-latest-x86_64-apple-darwin
-          zip L2-S2-BitNames-latest-x86_64-apple-darwin.zip \
-            bitnames-latest-x86_64-apple-darwin \
-            bitnames-cli-latest-x86_64-apple-darwin
-          mv bitnames-+([0-9]).+([0-9]).+([0-9])-aarch64-apple-darwin bitnames-latest-aarch64-apple-darwin
-          mv bitnames-cli-+([0-9]).+([0-9]).+([0-9])-aarch64-apple-darwin bitnames-cli-latest-aarch64-apple-darwin
-          zip L2-S2-BitNames-latest-aarch64-apple-darwin.zip \
-            bitnames-latest-aarch64-apple-darwin \
-            bitnames-cli-latest-aarch64-apple-darwin
-          mv bitnames-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe bitnames-latest-x86_64-pc-windows-gnu.exe
-          mv bitnames-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-pc-windows-gnu.exe bitnames-cli-latest-x86_64-pc-windows-gnu.exe
-          zip L2-S2-BitNames-latest-x86_64-pc-windows-gnu.zip \
-            bitnames-latest-x86_64-pc-windows-gnu.exe \
-            bitnames-cli-latest-x86_64-pc-windows-gnu.exe
-          mv bitnames-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu bitnames-latest-x86_64-unknown-linux-gnu
-          mv bitnames-cli-+([0-9]).+([0-9]).+([0-9])-x86_64-unknown-linux-gnu bitnames-cli-latest-x86_64-unknown-linux-gnu
-          zip L2-S2-BitNames-latest-x86_64-unknown-linux-gnu.zip \
-            bitnames-latest-x86_64-unknown-linux-gnu \
-            bitnames-cli-latest-x86_64-unknown-linux-gnu
-
-      - name: Upload release assets to releases.drivechain.info
-        uses: appleboy/scp-action@v1
-        with:
-          host: 45.33.96.47
-          username: root
-          password: ${{ secrets.RELEASES_SERVER_PW }}
-          port: 22
-          source: 'L2-S2-BitNames-latest-*.zip'
-          target: '/var/www/html/'
