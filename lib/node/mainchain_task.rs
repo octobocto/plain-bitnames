@@ -157,7 +157,7 @@ where
         })
     }
 
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run_once(&mut self) -> Result<(), Error> {
         while let Some((request, response_tx)) = self.request_rx.next().await {
             match request {
                 Request::AncestorInfos(main_block_hash) => {
@@ -186,6 +186,27 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Serve requests, and serve them again after an error. A requester that
+    /// drops its receiver must not stop the node from reading the mainchain.
+    async fn run(mut self) {
+        const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        loop {
+            match self.run_once().await {
+                Ok(()) => {
+                    tracing::warn!("Mainchain task: the request stream closed");
+                    return;
+                }
+                Err(err) => tracing::error!(
+                    "Mainchain task error: {:#}",
+                    ErrorChain::new(&err)
+                ),
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+            tracing::info!("Mainchain task: serving requests again");
+        }
     }
 }
 
@@ -220,14 +241,7 @@ impl MainchainTaskHandle {
             request_rx,
             response_tx,
         };
-        let task = spawn(async move {
-            if let Err(err) = task.run().await {
-                tracing::error!(
-                    "Mainchain task error: {:#}",
-                    ErrorChain::new(&err)
-                );
-            }
-        });
+        let task = spawn(task.run());
         let task_handle = MainchainTaskHandle {
             task: Arc::new(task),
             request_tx,
