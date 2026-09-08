@@ -173,6 +173,21 @@ const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
     }
 }
 
+/// Add every seed address the network names that the database does not hold.
+/// A datadir made before a seed existed would otherwise never learn it.
+fn ensure_seed_peers(
+    known_peers: &DatabaseUnique<SerdeBincode<SocketAddr>, Unit>,
+    rwtxn: &mut RwTxn,
+    network: Network,
+) -> Result<(), DbError> {
+    for seed_node_addr in seed_node_addrs(network) {
+        if known_peers.try_get(rwtxn, seed_node_addr)?.is_none() {
+            known_peers.put(rwtxn, seed_node_addr, &())?;
+        }
+    }
+    Ok(())
+}
+
 // Keep track of peer state
 // Exchange metadata
 // Bulk download
@@ -328,15 +343,9 @@ impl Net {
         let known_peers =
             match DatabaseUnique::open(env, &rwtxn, "known_peers")? {
                 Some(known_peers) => known_peers,
-                None => {
-                    let known_peers =
-                        DatabaseUnique::create(env, &mut rwtxn, "known_peers")?;
-                    for seed_node_addr in seed_node_addrs(network) {
-                        known_peers.put(&mut rwtxn, seed_node_addr, &())?;
-                    }
-                    known_peers
-                }
+                None => DatabaseUnique::create(env, &mut rwtxn, "known_peers")?,
             };
+        let () = ensure_seed_peers(&known_peers, &mut rwtxn, network)?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "net_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
             version.put(&mut rwtxn, &(), &*VERSION)?;
@@ -523,5 +532,63 @@ impl Net {
                     tracing::warn!("Failed to push tx {txid} to peer at {addr}")
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::net::SocketAddr;
+
+    use heed::types::{SerdeBincode, Unit};
+    use sneed::DatabaseUnique;
+
+    use crate::{
+        net::{ensure_seed_peers, seed_node_addrs},
+        types::Network,
+    };
+
+    fn temp_env(
+        test_name: &str,
+    ) -> anyhow::Result<(temp_dir::TempDir, sneed::Env)> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_dir = temp_dir::TempDir::with_prefix(format!(
+            "bitnames-{test_name}-{}-{nanos}",
+            std::process::id()
+        ))?;
+        let mut opts = heed::EnvOpenOptions::new();
+        opts.map_size(16 * 1024 * 1024).max_dbs(2);
+        let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
+        Ok((temp_dir, env))
+    }
+
+    /// Every seed reaches a peer table that already exists, and a second call
+    /// writes the same set.
+    #[test]
+    fn seeds_reach_an_existing_database() -> anyhow::Result<()> {
+        let (_temp_dir, env) = temp_env("seed-peers")?;
+        let network = Network::Signet;
+        let known_peers = {
+            let mut rwtxn = env.write_txn()?;
+            let known_peers: DatabaseUnique<SerdeBincode<SocketAddr>, Unit> =
+                DatabaseUnique::create(&env, &mut rwtxn, "known_peers")?;
+            ensure_seed_peers(&known_peers, &mut rwtxn, network)?;
+            ensure_seed_peers(&known_peers, &mut rwtxn, network)?;
+            rwtxn.commit()?;
+            known_peers
+        };
+        let rotxn = env.read_txn()?;
+        for seed_node_addr in seed_node_addrs(network) {
+            anyhow::ensure!(
+                known_peers.try_get(&rotxn, seed_node_addr)?.is_some(),
+                "the seed {seed_node_addr} never reached the database"
+            );
+        }
+        assert_eq!(
+            known_peers.len(&rotxn)?,
+            seed_node_addrs(network).len() as u64
+        );
+        Ok(())
     }
 }
