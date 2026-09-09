@@ -1051,6 +1051,7 @@ impl NetTask {
                     continue;
                 }
                 MailboxItem::PeerInfo(Some((addr, Some(peer_info)))) => {
+                    const RECONNECT_DELAY: Duration = Duration::from_secs(10);
                     tracing::trace!(%addr, ?peer_info, "mailbox item: received PeerInfo");
                     match peer_info {
                         PeerConnectionInfo::Error(
@@ -1058,8 +1059,6 @@ impl NetTask {
                                 PeerConnectionMailboxError::HeartbeatTimeout,
                             ),
                         ) => {
-                            const RECONNECT_DELAY: Duration =
-                                Duration::from_secs(10);
                             // Attempt to reconnect if a valid message was
                             // received successfully
                             let Some(received_msg_successfully) =
@@ -1086,6 +1085,14 @@ impl NetTask {
                                 format!("{:#}", ErrorChain::new(&err));
                             tracing::error!(%addr, err = err_msg, "Peer connection error");
                             let () = self.ctxt.net.remove_active_peer(addr);
+                            if err.is_duplicate_connection()
+                                || err.is_connect_timeout()
+                            {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    addr
+                                });
+                            }
                             // A peer on another network never becomes useful,
                             // so it must not survive into the next start.
                             if err.is_bad_magic() {
@@ -1303,5 +1310,135 @@ mod test {
     #[test]
     fn infrastructure_error_is_fatal() {
         assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
+    }
+}
+
+#[cfg(test)]
+mod peer_retry_test {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use anyhow::Context;
+
+    use crate::types::net::PeerConnectionStatus;
+    use crate::{
+        net::make_server_endpoint,
+        node::Node,
+        types::{Network, proto::mainchain::ValidatorClient},
+    };
+
+    async fn temp_node(
+        runtime: &tokio::runtime::Runtime,
+    ) -> anyhow::Result<(temp_dir::TempDir, Node)> {
+        let temp_dir = temp_dir::TempDir::new()?;
+        let channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                .connect_lazy();
+        let node = Node::new(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            temp_dir.path(),
+            ValidatorClient::new(channel),
+            None,
+            None,
+            Network::Regtest,
+            runtime,
+            #[cfg(feature = "zmq")]
+            (Ipv4Addr::LOCALHOST, 0).into(),
+        )
+        .await?;
+        Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn retry_connection_timeout_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime).await?;
+            let silent_peer =
+                tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let addr = silent_peer.local_addr()?;
+            node.connect_peer(addr)?;
+            assert_eq!(node.get_active_peers().len(), 1);
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            tokio::time::timeout(Duration::from_secs(35), async {
+                while !node.get_active_peers().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .context("the QUIC connection did not time out")?;
+            drop(silent_peer);
+            let (remote, _) = make_server_endpoint(addr)?;
+            let retry = tokio::time::timeout(Duration::from_secs(15), async {
+                remote
+                    .accept()
+                    .await
+                    .context("the endpoint closed before the retry")?
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .context("the node did not retry the connection timeout")??;
+            assert!(retry.close_reason().is_none());
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn retry_duplicate_close_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime).await?;
+            let (remote, _) =
+                make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+            let addr = remote.local_addr()?;
+            node.connect_peer(addr)?;
+            let first =
+                tokio::time::timeout(Duration::from_secs(5), remote.accept())
+                    .await?
+                    .context("the first connection did not arrive")?
+                    .await?;
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            let mut connection = first;
+            for _ in 0..2 {
+                let closed_at = tokio::time::Instant::now();
+                connection.close(1_u32.into(), b"already connected");
+                let retry = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    remote.accept(),
+                )
+                .await
+                .context("the node did not retry the duplicate close")?
+                .context("the endpoint closed before the retry")?
+                .await?;
+                assert!(closed_at.elapsed() >= Duration::from_secs(10));
+                assert_eq!(retry.remote_address(), connection.remote_address());
+                connection = retry;
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if node.get_active_peers().iter().any(|peer| {
+                        peer.address == addr
+                            && peer.status == PeerConnectionStatus::Connected
+                    }) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
     }
 }
