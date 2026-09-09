@@ -1,11 +1,15 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use error_fatality::{Fatality, Split};
 use sneed::{db, env, rwtxn};
 use thiserror::Error;
 use transitive::Transitive;
 
-use crate::net::PeerConnectionError;
+pub(crate) use crate::net::peer::error as peer;
+use crate::{net::PeerConnectionError, types::Version};
 
 #[derive(Debug, Error)]
 #[error("already connected to peer at {0}")]
@@ -70,6 +74,50 @@ pub(in crate::net) mod configure_client {
 }
 pub use configure_client::Error as ConfigureClient;
 
+#[derive(Debug, Error)]
+pub enum ConnectPeer {
+    #[error(transparent)]
+    AlreadyConnected(#[from] AlreadyConnected),
+    #[error("failed to commit db write txn")]
+    DbCommit(#[source] Box<rwtxn::error::Commit>),
+    #[error("database error")]
+    DbPut(#[source] Box<db::error::Put>),
+    #[error("failed to create db write txn")]
+    DbWriteTxn(#[source] Box<env::error::WriteTxn>),
+    #[error("quinn connect error")]
+    QuinnConnect(#[from] quinn::ConnectError),
+    /// Unspecified peer IP addresses cannot be connected to.
+    /// `0.0.0.0` is one example of an "unspecified" IP.
+    #[error("unspecified peer ip address (cannot connect to '{0}')")]
+    UnspecfiedPeerIP(IpAddr),
+}
+
+impl From<db::error::Put> for ConnectPeer {
+    fn from(err: db::error::Put) -> Self {
+        Self::DbPut(Box::new(err))
+    }
+}
+
+impl From<env::error::WriteTxn> for ConnectPeer {
+    fn from(err: env::error::WriteTxn) -> Self {
+        Self::DbWriteTxn(Box::new(err))
+    }
+}
+
+impl From<rwtxn::error::Commit> for ConnectPeer {
+    fn from(err: rwtxn::error::Commit) -> Self {
+        Self::DbCommit(Box::new(err))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DialKnownPeer {
+    #[error("failed to connect to peer")]
+    ConnectPeer(#[from] ConnectPeer),
+    #[error("DNS resolution for hostname failed")]
+    DnsResolve(#[source] std::io::Error),
+}
+
 #[allow(clippy::duplicated_attributes)]
 #[derive(Debug, Error, Transitive)]
 #[transitive(from(db::error::Put, db::Error))]
@@ -89,22 +137,27 @@ pub enum Error {
     Bincode(#[from] bincode::Error),
     #[error(transparent)]
     ConfigureClient(#[from] ConfigureClient),
-    #[error("connect error")]
-    Connect(#[from] quinn::ConnectError),
+    #[error("failed to connect to peer ({peer_addr})")]
+    ConnectPeer {
+        peer_addr: crate::types::net::PeerAddress,
+        source: ConnectPeer,
+    },
     #[error(transparent)]
     Db(#[from] db::Error),
     #[error("Database env error")]
     DbEnv(#[from] env::Error),
     #[error("Database write error")]
     DbWrite(#[from] rwtxn::Error),
-    #[error("quinn error")]
-    Io(#[from] std::io::Error),
+    #[error(
+        "Incompatible DB version ({}). Please clear the DB (`{}`) and re-sync",
+        .version,
+        .db_path.display()
+    )]
+    IncompatibleVersion { version: Version, db_path: PathBuf },
     #[error("peer connection not found for {0}")]
     MissingPeerConnection(SocketAddr),
-    /// Unspecified peer IP addresses cannot be connected to.
-    /// `0.0.0.0` is one example of an "unspecified" IP.
-    #[error("unspecified peer ip address (cannot connect to '{0}')")]
-    UnspecfiedPeerIP(IpAddr),
+    #[error("quinn error")]
+    Quinn(#[source] std::io::Error),
     #[error("peer connection")]
     PeerConnection(#[source] Box<PeerConnectionError>),
     #[error("quinn rustls error")]
