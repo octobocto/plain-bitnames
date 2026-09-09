@@ -167,6 +167,8 @@ const FORKNET_SEED_NODE_ADDRS: &[SocketAddr] = {
 
 const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
     match network {
+        // No seed runs on alphanet yet.
+        Network::Alphanet => &[],
         Network::Signet => SIGNET_SEED_NODE_ADDRS,
         Network::Regtest => &[],
         Network::Forknet => FORKNET_SEED_NODE_ADDRS,
