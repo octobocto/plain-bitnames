@@ -111,11 +111,19 @@ impl From<rwtxn::error::Commit> for ConnectPeer {
 }
 
 #[derive(Debug, Error)]
+pub enum ResolvePeerAddress {
+    #[error(transparent)]
+    Net(Box<hickory_resolver::net::NetError>),
+    #[error("unable to resolve host for domain ({domain})")]
+    NoIpAddrs { domain: String },
+}
+
+#[derive(Debug, Error)]
 pub enum DialKnownPeer {
     #[error("failed to connect to peer")]
     ConnectPeer(#[from] ConnectPeer),
     #[error("DNS resolution for hostname failed")]
-    DnsResolve(#[source] std::io::Error),
+    DnsResolve(#[from] ResolvePeerAddress),
 }
 
 #[allow(clippy::duplicated_attributes)]
@@ -135,6 +143,8 @@ pub enum Error {
     AlreadyConnected(#[from] AlreadyConnected),
     #[error("bincode error")]
     Bincode(#[from] bincode::Error),
+    #[error("failed to build DNS resolver")]
+    BuildDnsResolver(#[source] hickory_resolver::net::NetError),
     #[error(transparent)]
     ConfigureClient(#[from] ConfigureClient),
     #[error("failed to connect to peer ({peer_addr})")]

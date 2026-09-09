@@ -216,6 +216,10 @@ where
         res
     }
 
+    pub fn dns_resolver(&self) -> &Arc<hickory_resolver::TokioResolver> {
+        &self.net.dns_resolver
+    }
+
     pub fn try_get_tip_height(&self) -> Result<Option<u32>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.try_get_height(&rotxn)?)
