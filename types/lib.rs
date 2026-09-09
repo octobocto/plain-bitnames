@@ -703,9 +703,7 @@ pub trait Verify {
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct Block {
-    #[serde(flatten)]
     pub header: Header,
-    #[serde(flatten)]
     pub body: Body,
     pub height: u32,
 }
@@ -900,5 +898,34 @@ mod withdrawal_bundle_order_regression {
                 "m6id must not depend on aggregation order"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod block_wire_shape {
+    use bitcoin::hashes::Hash as _;
+
+    use super::*;
+
+    /// The orchestrator reads `block.header.prev_main_hash`, and the Esplora
+    /// index reads `block.body`. A flattened header put both at the top level,
+    /// so both readers saw an empty header and refused every bid.
+    #[test]
+    fn a_block_nests_its_header_and_its_body() {
+        let block = Block {
+            header: Header {
+                merkle_root: MerkleRoot::default(),
+                prev_side_hash: None,
+                prev_main_hash: bitcoin::BlockHash::all_zeros(),
+            },
+            body: Body::new(Vec::new(), Vec::new()),
+            height: 0,
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert!(json.get("header").is_some_and(|h| h.is_object()));
+        assert!(json.get("body").is_some_and(|b| b.is_object()));
+        assert!(json["header"].get("prev_main_hash").is_some());
+        assert!(json["body"].get("transactions").is_some());
+        assert!(json.get("prev_main_hash").is_none());
     }
 }
