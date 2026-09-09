@@ -89,7 +89,9 @@ async fn block_index_task(
     let () = sidechain.bmm_single(&mut enforcer_post_setup).await?;
 
     tracing::debug!("Checking that a height names the block it connected");
-    let height = sidechain.rpc_client.getblockcount().await?;
+    let block_count = sidechain.rpc_client.getblockcount().await?;
+    anyhow::ensure!(block_count > 0);
+    let height = block_count - 1;
     let block_hash = sidechain.rpc_client.get_block_hash(height).await?;
     anyhow::ensure!(
         block_hash
