@@ -1149,7 +1149,18 @@ impl NetTask {
                                 .env
                                 .write_txn()
                                 .map_err(EnvError::from)?;
-                            self.ctxt.mempool.put(&mut rwtxn, &new_tx)?;
+                            match self.ctxt.mempool.put(&mut rwtxn, &new_tx) {
+                                Ok(()) => (),
+                                Err(crate::mempool::Error::UtxoDoubleSpent) => {
+                                    tracing::debug!(
+                                        %addr,
+                                        txid = %new_tx.transaction.txid(),
+                                        "Reject peer transaction: UTXO already spent"
+                                    );
+                                    continue;
+                                }
+                                Err(err) => return Err(err.into()),
+                            }
                             rwtxn.commit().map_err(RwTxnError::from)?;
                             // broadcast
                             let () = self
@@ -1346,6 +1357,138 @@ mod peer_retry_test {
         )
         .await?;
         Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn peer_transaction_conflicts_do_not_stop_net_task() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+
+        use futures::channel::mpsc;
+        use heed::types::SerdeBincode;
+        use sneed::DatabaseUnique;
+
+        use super::{Error, NetTask, NetTaskContext};
+        use crate::{
+            net::PeerConnectionInfo,
+            types::{FilledOutput, OutPoint, OutPointKey, Transaction},
+            wallet::Wallet,
+        };
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (temp_dir, node) = temp_node(&runtime).await?;
+            node.net_task.task.abort();
+            while !node.net_task.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let wallet = Wallet::new(&temp_dir.path().join("wallet"))?;
+            wallet.set_seed(&[2; 64])?;
+            let address = wallet.get_new_address()?;
+            let mut inputs = Vec::new();
+            let mut utxos = HashMap::new();
+            let mut rwtxn = node.env.write_txn()?;
+            let state_utxos = DatabaseUnique::<
+                OutPointKey,
+                SerdeBincode<FilledOutput>,
+            >::create(
+                &node.env, &mut rwtxn, "utxos"
+            )?;
+            for index in 0..2 {
+                let outpoint = OutPoint::Regular {
+                    txid: [index; 32].into(),
+                    vout: 0,
+                };
+                let output = FilledOutput::new_bitcoin_value(
+                    address,
+                    bitcoin::Amount::from_sat(1_000),
+                );
+                state_utxos.put(
+                    &mut rwtxn,
+                    &OutPointKey::from(&outpoint),
+                    &output,
+                )?;
+                inputs.push(outpoint);
+                utxos.insert(outpoint, output);
+            }
+            wallet.put_utxos(&utxos)?;
+            let make_tx = |inputs, value| -> anyhow::Result<_> {
+                let tx = Transaction::new(
+                    inputs,
+                    vec![
+                        FilledOutput::new_bitcoin_value(
+                            address,
+                            bitcoin::Amount::from_sat(value),
+                        )
+                        .into(),
+                    ],
+                );
+                let tx = wallet.authorize(tx)?;
+                node.state.validate_transaction(&rwtxn, &tx)?;
+                Ok(tx)
+            };
+            let first_tx = make_tx(vec![inputs[0]], 900)?;
+            let conflict_tx = make_tx(vec![inputs[1], inputs[0]], 1_800)?;
+            let next_tx = make_tx(vec![inputs[1]], 900)?;
+            node.mempool.put(&mut rwtxn, &first_tx)?;
+            rwtxn.commit()?;
+
+            let (
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+            ) = mpsc::unbounded();
+            let (_mainchain_task_response_tx, mainchain_task_response_rx) =
+                mpsc::unbounded();
+            let (new_tip_ready_tx, new_tip_ready_rx) = mpsc::unbounded();
+            let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
+            let task = NetTask {
+                ctxt: NetTaskContext {
+                    env: node.env.clone(),
+                    archive: node.archive.clone(),
+                    mainchain_task: node.mainchain_task.clone(),
+                    mempool: node.mempool.clone(),
+                    net: node.net.clone(),
+                    state: node.state.clone(),
+                    #[cfg(feature = "zmq")]
+                    zmq_pub_handler: node.zmq_pub_handler.clone(),
+                },
+                forward_mainchain_task_request_tx,
+                forward_mainchain_task_request_rx,
+                mainchain_task_response_rx,
+                new_tip_ready_tx,
+                new_tip_ready_rx,
+                peer_info_rx,
+            };
+            for tx in [&first_tx, &conflict_tx, &next_tx] {
+                peer_info_tx.unbounded_send((
+                    (Ipv4Addr::LOCALHOST, 1).into(),
+                    Some(PeerConnectionInfo::NewTransaction(tx.clone())),
+                ))?;
+            }
+            drop(peer_info_tx);
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), task.run())
+                    .await?;
+            assert!(
+                matches!(result, Err(Error::PeerInfoRxClosed)),
+                "the network task stopped before the mailbox closed: {result:?}"
+            );
+            let rotxn = node.env.read_txn()?;
+            for tx in [&first_tx, &next_tx] {
+                assert!(
+                    node.mempool
+                        .transactions
+                        .try_get(&rotxn, &tx.transaction.txid())?
+                        .is_some()
+                );
+            }
+            assert!(
+                node.mempool
+                    .transactions
+                    .try_get(&rotxn, &conflict_tx.transaction.txid())?
+                    .is_none()
+            );
+            Ok(())
+        })
     }
 
     #[test]
