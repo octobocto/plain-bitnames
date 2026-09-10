@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
 };
 
@@ -20,16 +20,22 @@ use crate::types::{
 
 pub mod iter;
 pub use iter::{AncestorHeaders, Ancestors};
+pub mod side_tips;
+pub use side_tips::SideTips;
 
 #[allow(clippy::duplicated_attributes)]
 #[derive(Debug, thiserror::Error, transitive::Transitive)]
 #[transitive(
     from(db::error::Delete, DbError),
+    from(db::error::Get, DbError),
+    from(db::error::Last, DbError),
     from(db::error::Put, DbError),
     from(db::error::TryGet, DbError),
     from(env::error::CreateDb, EnvError),
     from(env::error::WriteTxn, EnvError),
-    from(rwtxn::error::Commit, RwTxnError)
+    from(rwtxn::error::Commit, RwTxnError),
+    from(side_tips::error::DisconnectMainchainTip, side_tips::Error),
+    from(side_tips::error::DisconnectSidechainTip, side_tips::Error)
 )]
 pub enum Error {
     #[error(transparent)]
@@ -79,11 +85,19 @@ pub enum Error {
     NoMainHeight(bitcoin::BlockHash),
     #[error("no tx with txid {0}")]
     NoTx(Txid),
+    #[error(transparent)]
+    SideTips(Box<side_tips::Error>),
 }
 
 impl From<DbError> for Error {
     fn from(err: DbError) -> Self {
         Self::Db(Box::new(err))
+    }
+}
+
+impl From<side_tips::Error> for Error {
+    fn from(err: side_tips::Error) -> Self {
+        Self::SideTips(Box::new(err))
     }
 }
 
@@ -144,6 +158,8 @@ pub struct Archive {
         SerdeBincode<bitcoin::BlockHash>,
         SerdeBincode<HashSet<bitcoin::BlockHash>>,
     >,
+    /// Sidechain tips that can be re-orged to as of best known mainchain tip
+    side_tips: SideTips,
     /// Successor blocks. ALL known block hashes MUST be present.
     successors: DatabaseUnique<
         SerdeBincode<Option<BlockHash>>,
@@ -164,7 +180,7 @@ pub struct Archive {
 }
 
 impl Archive {
-    pub const NUM_DBS: u32 = 14;
+    pub const NUM_DBS: u32 = SideTips::NUM_DBS + 14;
 
     pub fn new<Tls>(env: &sneed::Env<Tls>) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -223,6 +239,8 @@ impl Archive {
                 )
                 .map_err(DbError::from)?;
         }
+        let side_tips = SideTips::create(env, &mut rwtxn)
+            .map_err(side_tips::Error::from)?;
         let successors = DatabaseUnique::create(env, &mut rwtxn, "successors")?;
         if successors
             .try_get(&rwtxn, &None)
@@ -248,11 +266,16 @@ impl Archive {
             main_block_infos,
             main_header_infos,
             main_successors,
+            side_tips,
             successors,
             total_work,
             txid_to_inclusions,
             _version: version,
         })
+    }
+
+    pub fn side_tips(&self) -> &SideTips {
+        &self.side_tips
     }
 
     /** Get the height of a block from it's hash.
@@ -289,6 +312,15 @@ impl Archive {
             .map_err(DbError::from)?
             .unwrap_or_default();
         Ok(results)
+    }
+
+    pub fn contains_body(
+        &self,
+        rotxn: &RoTxn,
+        block_hash: &BlockHash,
+    ) -> Result<bool, Error> {
+        let res = self.bodies.contains_key(rotxn, block_hash)?;
+        Ok(res)
     }
 
     pub fn try_get_bmm_result(
@@ -403,13 +435,9 @@ impl Archive {
         rotxn: &RoTxn,
         block_hash: bitcoin::BlockHash,
     ) -> Result<Option<u32>, Error> {
-        if block_hash == bitcoin::BlockHash::all_zeros() {
-            Ok(Some(0))
-        } else {
-            self.main_block_hash_to_height
-                .try_get(rotxn, &block_hash)
-                .map_err(|err| DbError::from(err).into())
-        }
+        self.main_block_hash_to_height
+            .try_get(rotxn, &block_hash)
+            .map_err(|err| DbError::from(err).into())
     }
 
     pub fn get_main_height(
@@ -433,7 +461,7 @@ impl Archive {
         Ok(header_info)
     }
 
-    fn get_main_header_info(
+    pub fn get_main_header_info(
         &self,
         rotxn: &RoTxn,
         block_hash: &bitcoin::BlockHash,
@@ -691,7 +719,7 @@ impl Archive {
         block_hash: BlockHash,
         body: &Body,
     ) -> Result<(), Error> {
-        let _header = self.get_header(rwtxn, block_hash)?;
+        let header = self.get_header(rwtxn, block_hash)?;
         self.bodies.put(rwtxn, &block_hash, body)?;
         body.transactions
             .iter()
@@ -701,8 +729,72 @@ impl Archive {
                 let mut inclusions = self.get_tx_inclusions(rwtxn, txid)?;
                 inclusions.insert(block_hash, txin as u32);
                 self.txid_to_inclusions.put(rwtxn, &txid, &inclusions)?;
-                Ok(())
-            })
+                Ok::<_, Error>(())
+            })?;
+        let mainchain_tip = self
+            .side_tips
+            .get_mainchain_tip(rwtxn)
+            .map_err(side_tips::Error::from)?;
+        let update_side_tips = |rwtxn: &mut RwTxn<'_>,
+                                block_hash,
+                                header: &Header,
+                                queue: &mut VecDeque<_>|
+         -> Result<(), Error> {
+            let mut connected_sidechain_tip = false;
+            for (main_block_hash, bmm_result) in
+                self.get_bmm_results(rwtxn, block_hash)?
+            {
+                match bmm_result {
+                    BmmResult::Verified => (),
+                    BmmResult::Failed => continue,
+                }
+                if let Some(side_parent) = header.prev_side_hash
+                    && !self
+                        .side_tips
+                        .sidechain_tips()
+                        .contains_key(rwtxn, &side_parent)
+                        .map_err(side_tips::Error::from)?
+                {
+                    continue;
+                }
+                if !self.is_main_descendant(
+                    rwtxn,
+                    main_block_hash,
+                    mainchain_tip.block_hash(),
+                )? {
+                    continue;
+                }
+                let cumulative_work =
+                    self.get_total_work(rwtxn, main_block_hash)?;
+                let () = self
+                    .side_tips
+                    .connect_sidechain_tip(
+                        rwtxn,
+                        main_block_hash,
+                        cumulative_work,
+                        block_hash,
+                        header.into(),
+                    )
+                    .map_err(side_tips::Error::from)?;
+                connected_sidechain_tip = true;
+            }
+            if connected_sidechain_tip {
+                let successors =
+                    self.get_successors(rwtxn, Some(block_hash))?;
+                queue.extend(successors);
+            }
+            Ok(())
+        };
+        let mut queue = VecDeque::new();
+        let () = update_side_tips(rwtxn, block_hash, &header, &mut queue)?;
+        'update_side_tips: while let Some(block_hash) = queue.pop_front() {
+            if !self.contains_body(rwtxn, &block_hash)? {
+                continue 'update_side_tips;
+            }
+            let header = self.get_header(rwtxn, block_hash)?;
+            let () = update_side_tips(rwtxn, block_hash, &header, &mut queue)?;
+        }
+        Ok(())
     }
 
     /// Delete a stored body, reversing the effects of [`Self::put_body`].
@@ -727,8 +819,25 @@ impl Archive {
             } else {
                 self.txid_to_inclusions.put(rwtxn, &txid, &inclusions)?;
             }
-            Ok(())
-        })
+            Ok::<_, Error>(())
+        })?;
+        let mut queue = VecDeque::from_iter([block_hash]);
+        'update_side_tips: while let Some(block_hash) = queue.pop_front() {
+            if !self
+                .side_tips
+                .sidechain_tips()
+                .contains_key(rwtxn, &block_hash)?
+            {
+                continue 'update_side_tips;
+            };
+            // SAFETY: this loop also disconnects descendants
+            let () = unsafe {
+                self.side_tips.disconnect_sidechain_tip(rwtxn, &block_hash)
+            }?;
+            let successors = self.get_successors(rwtxn, Some(block_hash))?;
+            queue.extend(successors);
+        }
+        Ok(())
     }
 
     /// Store a header.
@@ -937,9 +1046,14 @@ impl Archive {
             return Err(Error::NoMainHeaderInfo(header_info.prev_block_hash));
         }
         let block_hash = header_info.block_hash;
-        let prev_height =
-            self.get_main_height(rwtxn, header_info.prev_block_hash)?;
-        let height = prev_height + 1;
+        let height =
+            if header_info.prev_block_hash == bitcoin::BlockHash::all_zeros() {
+                0
+            } else {
+                let prev_height =
+                    self.get_main_height(rwtxn, header_info.prev_block_hash)?;
+                prev_height + 1
+            };
         let total_work =
             if header_info.prev_block_hash != bitcoin::BlockHash::all_zeros() {
                 let prev_work =
