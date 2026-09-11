@@ -4754,6 +4754,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "transitive",
+ "url",
  "utoipa",
  "x25519-dalek",
  "zeromq",
@@ -4900,6 +4901,7 @@ dependencies = [
  "strum 0.28.0",
  "thiserror 2.0.19",
  "typenum",
+ "url",
  "utoipa",
  "x25519-dalek",
 ]
@@ -6724,6 +6726,7 @@ dependencies = [
  "futures-io",
  "futures-sink",
  "futures-util",
+ "hashbrown 0.15.5",
  "pin-project-lite",
  "tokio",
 ]

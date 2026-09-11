@@ -89,6 +89,14 @@ pub enum ParseAddress {
 }
 
 #[derive(Debug, Error)]
+pub enum ParsePeerAddress {
+    #[error("missing port")]
+    MissingPort,
+    #[error(transparent)]
+    Parse(#[from] url::ParseError),
+}
+
+#[derive(Debug, Error)]
 pub enum ParseBitNameSeqId {
     #[error("Empty segment; cannot start with `-` char")]
     EmptySegmentStart,

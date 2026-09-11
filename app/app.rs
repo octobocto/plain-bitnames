@@ -297,6 +297,7 @@ impl App {
         let local_pool = LocalPoolHandle::new(1);
         tracing::debug!("Initializing node...");
         let node = runtime.block_on(Node::new(
+            config.add_peers.clone(),
             config.net_addr,
             &config.datadir,
             cusf_mainchain,

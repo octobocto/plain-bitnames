@@ -38,6 +38,7 @@ use crate::{
     state::{self, State},
     types::{
         BmmResult, Body, Header, Tip,
+        net::ResolvedPeerAddress,
         proto::mainchain::{self, Event as MainchainBlockEvent},
     },
     util::{ErrorChain, join_set},
@@ -977,7 +978,7 @@ impl NetTask {
             NewTipReady(Tip, Option<SocketAddr>, Option<oneshot::Sender<bool>>),
             PeerInfo(Option<(SocketAddr, Option<PeerConnectionInfo>)>),
             // Signal to reconnect to a peer
-            ReconnectPeer(SocketAddr),
+            ReconnectPeer(ResolvedPeerAddress),
         }
         let accept_connections = stream::try_unfold((), |()| {
             let env = self.ctxt.env.clone();
@@ -1179,11 +1180,13 @@ impl NetTask {
                     const RECONNECT_DELAY: Duration = Duration::from_secs(10);
                     tracing::trace!(%addr, ?peer_info, "mailbox item: received PeerInfo");
                     match peer_info {
-                        PeerConnectionInfo::Error(
-                            PeerConnectionError::Mailbox(
-                                PeerConnectionMailboxError::HeartbeatTimeout,
-                            ),
-                        ) => {
+                        PeerConnectionInfo::Error {
+                            err:
+                                PeerConnectionError::Mailbox(
+                                    PeerConnectionMailboxError::HeartbeatTimeout,
+                                ),
+                            resolved_peer_addr,
+                        } => {
                             // Attempt to reconnect if a valid message was
                             // received successfully
                             let Some(received_msg_successfully) =
@@ -1202,10 +1205,13 @@ impl NetTask {
                             }
                             reconnect_peer_spawner.spawn(async move {
                                 tokio::time::sleep(RECONNECT_DELAY).await;
-                                addr
+                                resolved_peer_addr
                             });
                         }
-                        PeerConnectionInfo::Error(err) => {
+                        PeerConnectionInfo::Error {
+                            err,
+                            resolved_peer_addr,
+                        } => {
                             let err_msg =
                                 format!("{:#}", ErrorChain::new(&err));
                             tracing::error!(%addr, err = err_msg, "Peer connection error");
@@ -1213,14 +1219,26 @@ impl NetTask {
                             if err.is_duplicate_connection()
                                 || err.is_connect_timeout()
                             {
+                                let reconnect_addr = resolved_peer_addr.clone();
                                 reconnect_peer_spawner.spawn(async move {
                                     tokio::time::sleep(RECONNECT_DELAY).await;
-                                    addr
+                                    reconnect_addr
+                                });
+                            } else if !err.is_bad_magic()
+                                && let (_, Some(next_addr)) =
+                                    resolved_peer_addr.clone().pop_first_ip_addr()
+                            {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    next_addr
                                 });
                             }
                             // A peer on another network never becomes useful,
                             // so it must not survive into the next start.
                             if err.is_bad_magic() {
+                                let peer_address = resolved_peer_addr
+                                    .as_peer_address()
+                                    .to_owned();
                                 let mut rwtxn = self
                                     .ctxt
                                     .env
@@ -1229,11 +1247,11 @@ impl NetTask {
                                 let forgotten = self
                                     .ctxt
                                     .net
-                                    .forget_peer(&mut rwtxn, &addr)?;
+                                    .forget_peer(&mut rwtxn, &peer_address)?;
                                 rwtxn.commit().map_err(RwTxnError::from)?;
                                 if forgotten {
                                     tracing::warn!(
-                                        %addr,
+                                        %peer_address,
                                         "forgot peer: it runs another network"
                                     );
                                 }
@@ -1313,12 +1331,13 @@ impl NetTask {
                         }
                     }
                 }
-                MailboxItem::ReconnectPeer(peer_address) => {
-                    match self
-                        .ctxt
-                        .net
-                        .connect_peer(self.ctxt.env.clone(), peer_address)
-                    {
+                MailboxItem::ReconnectPeer(resolved_peer_address) => {
+                    let peer_address =
+                        resolved_peer_address.as_peer_address().to_owned();
+                    match self.ctxt.net.connect_peer(
+                        self.ctxt.env.clone(),
+                        resolved_peer_address,
+                    ) {
                         Ok(()) => (),
                         Err(err) => {
                             tracing::error!(
@@ -1451,7 +1470,7 @@ mod test {
 
 #[cfg(test)]
 mod peer_retry_test {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{collections::HashSet, net::Ipv4Addr, time::Duration};
 
     use anyhow::Context;
 
@@ -1470,6 +1489,7 @@ mod peer_retry_test {
             tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
                 .connect_lazy();
         let node = Node::new(
+            HashSet::new(),
             (Ipv4Addr::LOCALHOST, 0).into(),
             temp_dir.path(),
             ValidatorClient::new(channel),
@@ -1624,7 +1644,7 @@ mod peer_retry_test {
             let silent_peer =
                 tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let addr = silent_peer.local_addr()?;
-            node.connect_peer(addr)?;
+            node.connect_peer(addr.into())?;
             assert_eq!(node.get_active_peers().len(), 1);
             assert_eq!(
                 node.net.try_with_active_peer_connection(addr, |peer| peer
@@ -1665,7 +1685,7 @@ mod peer_retry_test {
             let (remote, _) =
                 make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
             let addr = remote.local_addr()?;
-            node.connect_peer(addr)?;
+            node.connect_peer(addr.into())?;
             let first =
                 tokio::time::timeout(Duration::from_secs(5), remote.accept())
                     .await?

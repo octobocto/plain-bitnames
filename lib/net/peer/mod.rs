@@ -19,9 +19,11 @@ use crate::{
     archive::Archive,
     state::State,
     types::{
-        AuthorizedTransaction, Hash, Tip, Version, hashes::hash,
-        net::PeerConnectionStatus,
+        AuthorizedTransaction, Hash, Tip, Version,
+        hashes::hash,
+        net::{PeerConnectionStatus, ResolvedPeerAddress},
     },
+    util::ErrorChain,
 };
 
 mod channel_pool;
@@ -109,7 +111,10 @@ pub struct PeerResponseItem {
 #[must_use]
 #[derive(Debug)]
 pub enum Info {
-    Error(ConnectionError),
+    Error {
+        err: ConnectionError,
+        resolved_peer_addr: ResolvedPeerAddress,
+    },
     /// Need Mainchain ancestors for the specified tip
     NeedMainchainAncestors {
         main_hash: bitcoin::BlockHash,
@@ -119,25 +124,6 @@ pub enum Info {
     NewTipReady(Tip),
     NewTransaction(AuthorizedTransaction),
     Response(Box<(ResponseMessage, Request)>),
-}
-
-impl From<ConnectionError> for Info {
-    fn from(err: ConnectionError) -> Self {
-        Self::Error(err)
-    }
-}
-
-impl<E, T> From<Result<T, E>> for Info
-where
-    ConnectionError: From<E>,
-    Info: From<T>,
-{
-    fn from(res: Result<T, E>) -> Self {
-        match res {
-            Ok(value) => value.into(),
-            Err(err) => Self::Error(err.into()),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -372,6 +358,7 @@ pub struct ConnectionContext {
     pub env: sneed::Env<heed::WithoutTls>,
     pub archive: Archive,
     pub magic_bytes: message::MagicBytes,
+    pub resolved_address: ResolvedPeerAddress,
     pub state: State,
 }
 
@@ -469,6 +456,7 @@ pub fn handle(
     let (mailbox_tx, mailbox_rx) = mailbox::new();
     let internal_message_tx = mailbox_tx.internal_message_tx.clone();
     let received_msg_successfully = Arc::new(AtomicBool::new(false));
+    let resolved_addr = ctxt.resolved_address.clone();
     let connection_task = {
         let info_tx = info_tx.clone();
         let received_msg_successfully = received_msg_successfully.clone();
@@ -486,12 +474,21 @@ pub fn handle(
     };
     let task = spawn(async move {
         if let Err(err) = connection_task().await {
-            tracing::error!(%addr, "connection task error, sending on info_tx: {err:#}");
+            tracing::error!(
+                %addr,
+                "connection task error, sending on info_tx: {:#}",
+                ErrorChain::new(&err),
+            );
 
-            if let Err(send_error) = info_tx.unbounded_send(err.into())
-                && let Info::Error(err) = send_error.into_inner()
+            if let Err(send_error) = info_tx.unbounded_send(Info::Error {
+                err,
+                resolved_peer_addr: resolved_addr,
+            }) && let Info::Error { err, .. } = send_error.into_inner()
             {
-                tracing::warn!("Failed to send error to receiver: {err}")
+                tracing::warn!(
+                    "Failed to send error to receiver: {:#}",
+                    ErrorChain::new(&err),
+                )
             }
         }
     });
@@ -515,6 +512,7 @@ pub fn connect(
     let (info_tx, info_rx) = mpsc::unbounded();
     let (mailbox_tx, mailbox_rx) = mailbox::new();
     let internal_message_tx = mailbox_tx.internal_message_tx.clone();
+    let resolved_address = ctxt.resolved_address.clone();
     let connection_task = {
         let received_msg_successfully = received_msg_successfully.clone();
         let status = status.clone();
@@ -541,10 +539,16 @@ pub fn connect(
     };
     let task = spawn(async move {
         if let Err(err) = connection_task().await
-            && let Err(send_error) = info_tx.unbounded_send(err.into())
-            && let Info::Error(err) = send_error.into_inner()
+            && let Err(send_error) = info_tx.unbounded_send(Info::Error {
+                err,
+                resolved_peer_addr: resolved_address,
+            })
+            && let Info::Error { err, .. } = send_error.into_inner()
         {
-            tracing::warn!("Failed to send error to receiver: {err}")
+            tracing::warn!(
+                "Failed to send error to receiver: {:#}",
+                ErrorChain::new(&err),
+            )
         }
     });
     let connection_handle = ConnectionHandle {

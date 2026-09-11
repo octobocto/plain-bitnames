@@ -16,7 +16,7 @@ use tonic::transport::Channel;
 use crate::{
     archive::Archive,
     mempool::{self, MemPool},
-    net::Net,
+    net::{DialKnownPeersHandle, Net},
     state::{self, State},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, Authorized,
@@ -25,7 +25,7 @@ use crate::{
         GetValue, Header, MainchainSyncProgress, Network, OutPoint,
         OutPointKey, SpentOutput, Tip, Transaction, TxIn, Txid,
         WithdrawalBundle,
-        net::Peer,
+        net::{Peer, PeerAddress, ResolvedPeerAddress},
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -49,6 +49,7 @@ pub struct Node<MainchainTransport = Channel> {
     cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
+    _dial_known_peers: Arc<DialKnownPeersHandle>,
     env: sneed::Env<heed::WithoutTls>,
     mainchain_task: MainchainTaskHandle,
     mempool: MemPool,
@@ -65,6 +66,7 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
+        add_peers: HashSet<PeerAddress>,
         bind_addr: SocketAddr,
         datadir: &Path,
         cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
@@ -131,13 +133,15 @@ where
                 archive.clone(),
                 cusf_mainchain.clone(),
             );
-        let (net, peer_info_rx) = Net::new(
+        let (net, peer_info_rx, dial_known_peers_handle) = Net::new(
+            runtime.handle(),
             &env,
             archive.clone(),
             magic_bytes_override,
             network,
             state.clone(),
             bind_addr,
+            add_peers,
         )?;
         let cusf_mainchain_wallet =
             cusf_mainchain_wallet.map(|wallet| Arc::new(Mutex::new(wallet)));
@@ -158,6 +162,7 @@ where
             archive,
             cusf_mainchain,
             cusf_mainchain_wallet,
+            _dial_known_peers: Arc::new(dial_known_peers_handle),
             env,
             mainchain_task,
             mempool,
@@ -679,13 +684,19 @@ where
         Ok(())
     }
 
-    pub fn connect_peer(&self, addr: SocketAddr) -> Result<(), Error> {
-        self.net
-            .connect_peer(self.env.clone(), addr)
-            .map_err(Error::from)
+    pub fn connect_peer(&self, addr: ResolvedPeerAddress) -> Result<(), Error> {
+        let peer_addr = addr.as_peer_address().to_owned();
+        let () =
+            self.net
+                .connect_peer(self.env.clone(), addr)
+                .map_err(|err| crate::net::Error::ConnectPeer {
+                    peer_addr,
+                    source: err,
+                })?;
+        Ok(())
     }
 
-    pub fn forget_peer(&self, addr: &SocketAddr) -> Result<bool, Error> {
+    pub fn forget_peer(&self, addr: &PeerAddress) -> Result<bool, Error> {
         let mut rwtxn = self.env.write_txn().map_err(EnvError::from)?;
         let res = self.net.forget_peer(&mut rwtxn, addr)?;
         rwtxn.commit().map_err(RwTxnError::from)?;
