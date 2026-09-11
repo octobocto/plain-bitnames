@@ -172,6 +172,8 @@ pub enum Command {
     ListStxos,
     /// List all UTXOs
     ListUtxos,
+    /// Get the progress of the startup sync with the mainchain
+    MainchainSyncProgress,
     /// Attempt to mine a sidechain block
     Mine {
         #[arg(long)]
@@ -516,6 +518,10 @@ where
         Command::ListUtxos => {
             let utxos = rpc_client.list_utxos().await?;
             serde_json::to_string_pretty(&utxos)?
+        }
+        Command::MainchainSyncProgress => {
+            let progress = rpc_client.mainchain_sync_progress().await?;
+            serde_json::to_string_pretty(&progress)?
         }
         Command::Mine { fee_sats } => {
             let () = rpc_client.mine(fee_sats).await?;
