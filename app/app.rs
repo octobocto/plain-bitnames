@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use fallible_iterator::FallibleIterator as _;
+use fallible_iterator::{FallibleIterator as _, IteratorExt as _};
 use futures::{StreamExt as _, TryFutureExt as _};
 use parking_lot::RwLock;
 use plain_bitnames::{
@@ -414,8 +414,11 @@ impl App {
             })
             .map(|(outpoint, txid)| {
                 let inclusions = self.node.get_tx_inclusions(txid)?;
-                let Some(block_hash) =
-                    inclusions.into_keys().try_find(|block_hash| {
+                let Some(block_hash) = inclusions
+                    .into_keys()
+                    .map(Ok)
+                    .transpose_into_fallible()
+                    .find(|block_hash| {
                         self.node.is_descendant(*block_hash, tip)
                     })?
                 else {
@@ -435,9 +438,13 @@ impl App {
                     )
                 };
                 let inclusions = self.node.get_tx_inclusions(txid)?;
-                let Some(block_hash) = inclusions.into_keys().try_find(|block_hash| {
-                    self.node.is_descendant(*block_hash, tip)
-                })? else {
+                let Some(block_hash) = inclusions
+                    .into_keys()
+                    .map(Ok)
+                    .transpose_into_fallible()
+                    .find(|block_hash| {
+                        self.node.is_descendant(*block_hash, tip)
+                    })? else {
                     return Ok((spent_output.inpoint, None));
                 };
                 let height = self.node.get_height(block_hash)?;
