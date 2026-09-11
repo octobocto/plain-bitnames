@@ -71,6 +71,14 @@ pub mod node {
             addr: SocketAddr,
         ) -> RpcResult<()>;
 
+        /// Invalidate a block, potentially re-orging to a valid ancestor of
+        /// the current tip.
+        #[method(name = "invalidate_block")]
+        async fn invalidate_block(
+            &self,
+            block_hash: BlockHash,
+        ) -> RpcResult<()>;
+
         /// Stop the node
         #[method(name = "stop")]
         async fn stop(&self);

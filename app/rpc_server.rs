@@ -100,6 +100,13 @@ impl rpc_api::node::PrivateRpcServer for RpcServerImpl<true> {
         }
     }
 
+    async fn invalidate_block(&self, block_hash: BlockHash) -> RpcResult<()> {
+        self.app
+            .node
+            .invalidate_block(block_hash)
+            .map_err(custom_err)
+    }
+
     async fn stop(&self) {
         std::process::exit(0);
     }
