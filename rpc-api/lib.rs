@@ -31,9 +31,10 @@ pub mod node {
         BitNameData, BitNameDataUpdates, BitNameSeqId, BitcoinOutputContent,
         Block, BlockHash, BlockIndex, BlockIndexDeposit, BlockIndexSpend,
         BlockIndexTx, Body, EncryptionPubKey, FilledOutput,
-        FilledOutputContent, Header, InPoint, M6id, MempoolTx, MerkleRoot,
-        MutableBitNameData, OutPoint, Output, OutputContent, PointedOutput,
-        SpentOutput, Transaction, TransactionData, TxIn, Txid, VerifyingKey,
+        FilledOutputContent, Header, InPoint, M6id, MainchainSyncPhase,
+        MainchainSyncProgress, MempoolTx, MerkleRoot, MutableBitNameData,
+        OutPoint, Output, OutputContent, PointedOutput, SpentOutput,
+        Transaction, TransactionData, TxIn, Txid, VerifyingKey,
         WithdrawalBundle, WithdrawalOutputContent,
         authorization::Signature,
         hashes::BitName,
@@ -87,7 +88,8 @@ pub mod node {
         BitcoinOutputContent, BitName, BitNameDataUpdates, BitNameSeqId,
         BlockHash, BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, Body,
         EncryptionPubKey, FilledOutput, FilledOutputContent, Header, InPoint,
-        M6id, MerkleRoot, MutableBitNameData, OutPoint, Output, OutputContent,
+        M6id, MainchainSyncPhase, MerkleRoot, MutableBitNameData, OutPoint,
+        Output, OutputContent,
         PeerConnectionStatus, Signature, SpentOutput, Transaction,
         TransactionData, Txid, TxIn, VerifyingKey, WithdrawalOutputContent,
         bitnames_schema::BitcoinAddr, bitnames_schema::BitcoinBlockHash,
@@ -246,6 +248,13 @@ pub mod node {
         async fn list_utxos(
             &self,
         ) -> RpcResult<Vec<PointedOutput<FilledOutput>>>;
+
+        /// Get the progress of the startup sync with the mainchain
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "mainchain_sync_progress")]
+        async fn mainchain_sync_progress(
+            &self,
+        ) -> RpcResult<MainchainSyncProgress>;
 
         /// Get pending withdrawal bundle
         #[open_api_method(output_schema(ToSchema))]
