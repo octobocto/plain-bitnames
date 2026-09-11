@@ -304,6 +304,7 @@ impl App {
             cusf_mainchain_wallet,
             config.network_magic_override,
             config.network,
+            config.server_names.clone(),
             &runtime,
             #[cfg(feature = "zmq")]
             config.zmq_addr,

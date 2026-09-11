@@ -75,6 +75,7 @@ where
         >,
         magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
         network: Network,
+        server_names: HashSet<String>,
         runtime: &tokio::runtime::Runtime,
         #[cfg(feature = "zmq")] zmq_addr: SocketAddr,
     ) -> Result<Self, Error>
@@ -142,6 +143,7 @@ where
             state.clone(),
             bind_addr,
             add_peers,
+            server_names,
         )?;
         let cusf_mainchain_wallet =
             cusf_mainchain_wallet.map(|wallet| Arc::new(Mutex::new(wallet)));

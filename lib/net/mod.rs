@@ -112,9 +112,12 @@ fn configure_client() -> Result<ClientConfig, error::ConfigureClient> {
     Ok(ClientConfig::new(Arc::new(client_config)))
 }
 /// Returns default server configuration along with its certificate.
-fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
-    let cert_key =
-        rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+fn configure_server(
+    mut server_names: HashSet<String>,
+) -> Result<(ServerConfig, Vec<u8>), Error> {
+    server_names.insert("localhost".to_owned());
+    let server_names = Vec::from_iter(server_names);
+    let cert_key = rcgen::generate_simple_self_signed(server_names)?;
     let keypair_der = cert_key.key_pair.serialize_der();
     let priv_key = rustls::pki_types::PrivateKeyDer::Pkcs8(keypair_der.into());
     let cert_der = cert_key.cert.der().to_vec();
@@ -134,8 +137,9 @@ fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
 /// - server certificate serialized into DER format
 pub fn make_server_endpoint(
     bind_addr: SocketAddr,
+    server_names: HashSet<String>,
 ) -> Result<(Endpoint, Vec<u8>), Error> {
-    let (server_config, server_cert) = configure_server()?;
+    let (server_config, server_cert) = configure_server(server_names)?;
     tracing::info!(%bind_addr, "creating server endpoint");
     let mut endpoint = Endpoint::server(server_config, bind_addr)?;
     let client_cfg = configure_client()?;
@@ -393,7 +397,11 @@ impl Net {
             if addr.ip().is_unspecified() {
                 return Err(error::ConnectPeer::UnspecfiedPeerIP(addr.ip()));
             }
-            match self.server.connect(addr, "localhost") {
+            let server_name = match resolved_addr.host() {
+                url::Host::Domain(domain) => domain.as_str(),
+                url::Host::Ipv4(_) | url::Host::Ipv6(_) => "localhost",
+            };
+            match self.server.connect(addr, server_name) {
                 Ok(connecting) => break (addr, connecting),
                 Err(err @ quinn::ConnectError::InvalidRemoteAddress(_)) => {
                     let (_, Some(next_addr)) =
@@ -455,8 +463,9 @@ impl Net {
         state: State,
         bind_addr: SocketAddr,
         add_peers: HashSet<PeerAddress>,
+        server_names: HashSet<String>,
     ) -> Result<(Self, PeerInfoRx, DialKnownPeersHandle), Error> {
-        let (server, _) = make_server_endpoint(bind_addr)?;
+        let (server, _) = make_server_endpoint(bind_addr, server_names)?;
         let active_peers = Arc::new(RwLock::new(HashMap::new()));
         let mut rwtxn = env.write_txn()?;
         let known_peers =
@@ -699,6 +708,7 @@ mod test {
             state,
             (Ipv4Addr::LOCALHOST, 0).into(),
             HashSet::new(),
+            HashSet::new(),
         )?;
         Ok((temp_dir, env, net, info_rx))
     }
@@ -707,8 +717,10 @@ mod test {
     async fn connect_peer_skips_ipv6_on_an_ipv4_endpoint() -> anyhow::Result<()>
     {
         let (_temp_dir, env, net, mut info_rx) = temp_net("peer-family")?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
         let next_ip = Ipv4Addr::new(127, 0, 0, 2);
         let resolved = ResolvedPeerAddress::Domain {
@@ -777,8 +789,10 @@ mod test {
     #[tokio::test]
     async fn connect_peer_keeps_a_static_ipv4_address() -> anyhow::Result<()> {
         let (_temp_dir, env, net, _info_rx) = temp_net("peer-static")?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
 
         net.connect_peer(env, addr.into())?;
@@ -881,9 +895,12 @@ mod peer_handle_test {
             state,
             (Ipv4Addr::LOCALHOST, 0).into(),
             HashSet::new(),
+            HashSet::new(),
         )?;
-        let (remote, _) =
-            make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+        let (remote, _) = make_server_endpoint(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            HashSet::new(),
+        )?;
         let addr = remote.local_addr()?;
         net.connect_peer(env.clone(), addr.into())?;
         let connection_ctxt = PeerConnectionCtxt {
