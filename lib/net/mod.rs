@@ -7,6 +7,7 @@ use std::{
 use fallible_iterator::FallibleIterator;
 use futures::{StreamExt, channel::mpsc};
 use heed::types::{SerdeBincode, Unit};
+use hickory_resolver::TokioResolver;
 use parking_lot::RwLock;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use sneed::{DatabaseUnique, DbError, EnvError, RwTxn, UnitKey};
@@ -205,10 +206,12 @@ fn ensure_seed_peers(
 }
 
 pub async fn resolve_peer_address<S>(
+    dns_resolver: &TokioResolver,
     peer_addr: PeerAddress<S>,
-) -> std::io::Result<ResolvedPeerAddress<S>>
+) -> Result<ResolvedPeerAddress<S>, error::ResolvePeerAddress>
 where
     S: std::fmt::Display,
+    for<'a> &'a S: hickory_resolver::proto::rr::IntoName,
 {
     match peer_addr.host {
         url::Host::Ipv4(ipv4) => Ok(ResolvedPeerAddress::Static(
@@ -218,17 +221,12 @@ where
             SocketAddr::new(IpAddr::V6(ipv6), peer_addr.port),
         )),
         url::Host::Domain(domain) => {
-            // `lookup_host` reads a `host:port` pair, not a bare name.
-            let host_port = format!("{domain}:{}", peer_addr.port);
-            let mut addrs: Vec<_> = tokio::net::lookup_host(host_port)
-                .await?
-                .filter_map(|addr| {
-                    if addr.ip().is_unspecified() {
-                        None
-                    } else {
-                        Some(addr.ip())
-                    }
-                })
+            let mut addrs: Vec<_> = dns_resolver
+                .lookup_ip(&domain)
+                .await
+                .map_err(|err| error::ResolvePeerAddress::Net(Box::new(err)))?
+                .into_iter()
+                .filter(|addr| !addr.is_unspecified())
                 .collect();
             if let Some(last_addr) = addrs.pop() {
                 addrs.reverse();
@@ -242,10 +240,9 @@ where
                     domain,
                 })
             } else {
+                let domain = domain.to_string();
                 tracing::warn!(%domain, "unable to resolve host");
-                let err_msg =
-                    format!("unable to resolve host for domain ({domain})");
-                Err(std::io::Error::other(err_msg))
+                Err(error::ResolvePeerAddress::NoIpAddrs { domain })
             }
         }
     }
@@ -282,6 +279,7 @@ impl DialKnownPeersHandle {
 pub struct Net {
     pub server: Endpoint,
     archive: Archive,
+    pub dns_resolver: Arc<TokioResolver>,
     magic_bytes: peer_message::MagicBytes,
     state: State,
     active_peers: Arc<RwLock<HashMap<SocketAddr, PeerConnectionHandle>>>,
@@ -439,9 +437,10 @@ impl Net {
         peer_addr: PeerAddress,
     ) -> Result<(), error::DialKnownPeer> {
         tracing::trace!("connecting to already known peer at {peer_addr}");
-        let resolved_peer_addr = resolve_peer_address(peer_addr)
-            .await
-            .map_err(error::DialKnownPeer::DnsResolve)?;
+        let resolved_peer_addr =
+            resolve_peer_address(&self.dns_resolver, peer_addr)
+                .await
+                .map_err(error::DialKnownPeer::DnsResolve)?;
         let () = self.connect_peer(env, resolved_peer_addr)?;
         Ok(())
     }
@@ -476,10 +475,17 @@ impl Net {
         rwtxn.commit()?;
         let magic_bytes = magic_bytes_override
             .unwrap_or_else(|| peer_message::magic_bytes(network));
+        let dns_resolver = {
+            let builder = hickory_resolver::Resolver::builder_tokio()
+                .map_err(Error::BuildDnsResolver)?;
+            let resolver = builder.build().map_err(Error::BuildDnsResolver)?;
+            Arc::new(resolver)
+        };
         let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
         let net = Net {
             server,
             archive,
+            dns_resolver,
             magic_bytes,
             state,
             active_peers,
@@ -834,8 +840,10 @@ mod test {
     /// A seed names a host and a port, and the resolver keeps both.
     #[tokio::test]
     async fn a_seed_name_resolves_with_its_port() -> anyhow::Result<()> {
+        let dns_resolver =
+            hickory_resolver::Resolver::builder_tokio()?.build()?;
         let peer_addr: PeerAddress = "localhost:4002".parse()?;
-        let resolved = resolve_peer_address(peer_addr).await?;
+        let resolved = resolve_peer_address(&dns_resolver, peer_addr).await?;
         assert_eq!(resolved.port(), 4002);
         assert!(
             resolved
