@@ -1,8 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-};
+use std::{borrow::Cow, collections::HashSet, net::SocketAddr};
 
 use bitcoin::Amount;
 use jsonrpsee::{
@@ -15,9 +11,8 @@ use plain_bitnames::{
     authorization::{self, Dst, Signature},
     types::{
         Address, Authorization, BitName, BitNameData, Block, BlockHash,
-        EncryptionPubKey, FilledOutput, MutableBitNameData, OutPoint,
-        PointedOutput, SpentOutput, Transaction, Txid, VerifyingKey,
-        WithdrawalBundle,
+        EncryptionPubKey, FilledOutput, MutableBitNameData, PointedOutput,
+        SpentOutput, Transaction, Txid, VerifyingKey, WithdrawalBundle,
         keys::{Ecies, XEncryptionSecretKey, XVerifyingKey},
         net::{Peer, PeerAddress},
         wallet::{Balance, TransferDests},
@@ -248,8 +243,13 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .map_err(custom_err)
     }
 
-    async fn get_paymail(&self) -> RpcResult<HashMap<OutPoint, FilledOutput>> {
-        self.app.get_paymail(None).map_err(custom_err)
+    async fn get_paymail(&self) -> RpcResult<rpc_api::node::Paymail> {
+        self.app
+            .get_paymail(None)
+            .map(|outputs| {
+                rpc_api::node::Paymail(outputs.into_iter().collect())
+            })
+            .map_err(custom_err)
     }
 
     async fn get_stxos(

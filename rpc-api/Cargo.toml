@@ -13,7 +13,7 @@ l2l-openapi = { workspace = true }
 plain_bitnames_types = { path = "../types" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_with = { workspace = true, features = ["hex", "macros"] }
+serde_with = { workspace = true, features = ["hex", "json", "macros"] }
 utoipa = { workspace = true }
 
 [dev-dependencies]

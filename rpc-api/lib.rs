@@ -19,7 +19,7 @@ pub mod open_api {
 }
 
 pub mod node {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashSet};
 
     use jsonrpsee::{core::RpcResult, proc_macros::rpc};
     use l2l_openapi::open_api;
@@ -68,6 +68,16 @@ pub mod node {
         #[method(name = "stop")]
         async fn stop(&self);
     }
+
+    /// Inbox outputs use JSON text as map keys.
+    #[serde_with::serde_as]
+    #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+    #[serde(transparent)]
+    #[schema(value_type = BTreeMap<String, FilledOutput>)]
+    pub struct Paymail(
+        #[serde_as(as = "BTreeMap<serde_with::json::JsonString, _>")]
+        pub  BTreeMap<OutPoint, FilledOutput>,
+    );
 
     #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
     pub struct TxInfo {
@@ -174,9 +184,7 @@ pub mod node {
 
         /// Get all paymail
         #[method(name = "get_paymail")]
-        async fn get_paymail(
-            &self,
-        ) -> RpcResult<HashMap<OutPoint, FilledOutput>>;
+        async fn get_paymail(&self) -> RpcResult<Paymail>;
 
         /// Get stxos for addresses
         #[method(name = "get_stxos")]
