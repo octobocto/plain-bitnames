@@ -317,3 +317,75 @@ fn check_schemas() -> anyhow::Result<()> {
     let () = check_schema::<crate::wallet::RpcDoc>()?;
     Ok(())
 }
+
+#[test]
+fn paymail_rpc_returns_nonempty_outputs() -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+
+    use bitcoin::hashes::Hash as _;
+    use jsonrpsee::{
+        core::server::{MethodResponse, ResponsePayload},
+        types::Id,
+    };
+    use plain_bitnames_types::{Address, FilledOutput, OutPoint, Txid};
+
+    let outpoints = [
+        OutPoint::Regular {
+            txid: Txid([1; 32]),
+            vout: 2,
+        },
+        OutPoint::Coinbase {
+            merkle_root: [2; 32].into(),
+            vout: 3,
+        },
+        OutPoint::Deposit(bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([3; 32]),
+            vout: 4,
+        }),
+    ];
+    let mut output = FilledOutput::new_bitcoin_value(
+        Address([4; 20]),
+        bitcoin::Amount::from_sat(1_000),
+    );
+    output.memo = vec![0, 127, 255];
+    for outpoint in outpoints {
+        let paymail =
+            crate::node::Paymail(BTreeMap::from([(outpoint, output.clone())]));
+        let response = MethodResponse::response(
+            Id::Number(1),
+            ResponsePayload::success(paymail.clone()),
+            usize::MAX,
+        );
+        assert!(response.is_success(), "{response}");
+        let response: serde_json::Value =
+            serde_json::from_str(response.as_ref())?;
+        let key = serde_json::to_string(&outpoint)?;
+        assert_eq!(response["result"][&key], serde_json::to_value(&output)?);
+        assert_eq!(response["result"][&key]["memo"], "007fff");
+        let decoded: crate::node::Paymail =
+            serde_json::from_value(response["result"].clone())?;
+        assert_eq!(decoded.0, paymail.0);
+    }
+    Ok(())
+}
+
+#[test]
+fn paymail_rpc_keeps_an_empty_object() -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+
+    use jsonrpsee::{
+        core::server::{MethodResponse, ResponsePayload},
+        types::Id,
+    };
+
+    let response = MethodResponse::response(
+        Id::Number(1),
+        ResponsePayload::success(crate::node::Paymail(BTreeMap::new())),
+        usize::MAX,
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response.as_ref())?,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {}})
+    );
+    Ok(())
+}
