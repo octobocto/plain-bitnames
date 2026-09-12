@@ -74,6 +74,7 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
         .collect();
     wallet.put_utxos(&utxos)?;
     wallet.spend_utxos(&spent)?;
+    wallet.set_pending_transactions(&node.get_all_transactions()?);
     tracing::debug!("finished wallet update");
     Ok(())
 }
@@ -312,6 +313,7 @@ impl App {
         let utxos = {
             let mut utxos = wallet.get_utxos()?;
             let transactions = node.get_all_transactions()?;
+            wallet.set_pending_transactions(&transactions);
             for transaction in &transactions {
                 for input in &transaction.transaction.inputs {
                     utxos.remove(input);

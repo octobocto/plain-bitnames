@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     path::Path,
+    sync::Arc,
 };
 
 use bitcoin::Amount;
@@ -13,6 +14,7 @@ use heed::{
     byteorder::BigEndian,
     types::{Bytes, SerdeBincode, Str, U8, U32},
 };
+use parking_lot::RwLock;
 use rayon::prelude::ParallelSliceMut;
 use sneed::{DbError, Env, UnitKey};
 use thiserror::Error;
@@ -69,6 +71,7 @@ pub struct Wallet {
     /// Map each signing key index to a verifying key
     index_to_vk: DatabaseUnique<U32<BigEndian>, SerdeBincode<VerifyingKey>>,
     utxos: DatabaseUnique<OutPointKey, SerdeBincode<FilledOutput>>,
+    pending_inputs: Arc<RwLock<HashSet<OutPoint>>>,
     stxos: DatabaseUnique<OutPointKey, SerdeBincode<SpentOutput>>,
     /// Associates reservation commitments with plaintext BitNames
     bitname_reservations: DatabaseUnique<SerdeBincode<[u8; 32]>, Str>,
@@ -149,6 +152,7 @@ impl Wallet {
             index_to_epk,
             index_to_vk,
             utxos,
+            pending_inputs: Arc::new(RwLock::new(HashSet::new())),
             stxos,
             bitname_reservations,
             known_bitnames,
@@ -776,6 +780,17 @@ impl Wallet {
         Ok(())
     }
 
+    /// Set the inputs that pending transactions use.
+    pub fn set_pending_transactions(
+        &self,
+        transactions: &[AuthorizedTransaction],
+    ) {
+        *self.pending_inputs.write() = transactions
+            .iter()
+            .flat_map(|tx| tx.transaction.inputs.iter().copied())
+            .collect();
+    }
+
     pub fn select_coins(
         &self,
         value: bitcoin::Amount,
@@ -787,8 +802,11 @@ impl Wallet {
 
         let mut selected = HashMap::new();
         let mut total = bitcoin::Amount::ZERO;
+        let pending_inputs = self.pending_inputs.read();
         for (outpoint_key, output) in &utxos {
-            if output.content.is_withdrawal()
+            let outpoint = outpoint_key.to_outpoint();
+            if pending_inputs.contains(&outpoint)
+                || output.content.is_withdrawal()
                 || output.is_bitname()
                 || output.is_reservation()
                 || output.get_value() == bitcoin::Amount::ZERO
@@ -801,7 +819,6 @@ impl Wallet {
             total = total
                 .checked_add(output.get_value())
                 .ok_or(AmountOverflowError)?;
-            let outpoint: OutPoint = outpoint_key.to_outpoint();
             selected.insert(outpoint, output.clone());
         }
         if total < value {
@@ -1048,6 +1065,7 @@ impl Watchable<()> for Wallet {
             index_to_epk,
             index_to_vk,
             utxos,
+            pending_inputs: _,
             stxos,
             bitname_reservations,
             known_bitnames,
@@ -1084,6 +1102,7 @@ mod test {
     use std::collections::{BTreeMap, HashMap};
 
     use crate::{
+        mempool::MemPool,
         types::{Address, FilledOutput, GetValue as _, OutPoint, Output},
         wallet::{Error, Wallet},
     };
@@ -1121,6 +1140,88 @@ mod test {
 
     fn value_of(output: &Output) -> u64 {
         output.get_value().to_sat()
+    }
+
+    fn mempool() -> anyhow::Result<(temp_dir::TempDir, sneed::Env, MemPool)> {
+        let dir = temp_dir::TempDir::new()?;
+        let mut options = heed::EnvOpenOptions::new();
+        options.map_size(64 * 1024 * 1024).max_dbs(MemPool::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&options, dir.path()) }?;
+        let pool = MemPool::new(&env)?;
+        Ok((dir, env, pool))
+    }
+
+    #[test]
+    fn test_pending_sends_use_distinct_inputs() -> anyhow::Result<()> {
+        let (test_dir, wallet) =
+            funded_wallet("pending_distinct", &[2000, 3000])?;
+        let (_pool_dir, env, pool) = mempool()?;
+        let chain_utxos = wallet.get_utxos()?;
+        let value = bitcoin::Amount::from_sat(1000);
+        let fee = bitcoin::Amount::from_sat(100);
+        let first = wallet.authorize(wallet.create_transfer(
+            Address([1; 20]),
+            value,
+            fee,
+            None,
+        )?)?;
+        let mut rwtxn = env.write_txn()?;
+        pool.put(&mut rwtxn, &first)?;
+        rwtxn.commit()?;
+
+        let next_wallet = wallet.clone();
+        wallet.put_utxos(&chain_utxos)?;
+        wallet.set_pending_transactions(&pool.take_all(&*env.read_txn()?)?);
+        let second = next_wallet.authorize(next_wallet.create_transfer(
+            Address([2; 20]),
+            value,
+            fee,
+            None,
+        )?)?;
+        assert!(
+            first
+                .transaction
+                .inputs
+                .iter()
+                .all(|input| { !second.transaction.inputs.contains(input) })
+        );
+        let mut rwtxn = env.write_txn()?;
+        pool.put(&mut rwtxn, &second)?;
+        rwtxn.commit()?;
+
+        assert_eq!(pool.take_all(&*env.read_txn()?)?.len(), 2);
+        assert_eq!(wallet.get_utxos()?, chain_utxos);
+        assert!(wallet.get_stxos()?.is_empty());
+        std::fs::remove_dir_all(test_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pending_send_excludes_the_only_coin() -> anyhow::Result<()> {
+        let (test_dir, wallet) = funded_wallet("pending_only", &[2000])?;
+        let (_pool_dir, env, pool) = mempool()?;
+        let chain_utxos = wallet.get_utxos()?;
+        let value = bitcoin::Amount::from_sat(1000);
+        let fee = bitcoin::Amount::from_sat(100);
+        let first = wallet.authorize(wallet.create_transfer(
+            Address([1; 20]),
+            value,
+            fee,
+            None,
+        )?)?;
+        let mut rwtxn = env.write_txn()?;
+        pool.put(&mut rwtxn, &first)?;
+        rwtxn.commit()?;
+
+        wallet.put_utxos(&chain_utxos)?;
+        wallet.set_pending_transactions(&pool.take_all(&*env.read_txn()?)?);
+        let second = wallet.create_transfer(Address([2; 20]), value, fee, None);
+        assert!(matches!(second, Err(Error::NotEnoughFunds)));
+        assert_eq!(pool.take_all(&*env.read_txn()?)?.len(), 1);
+        assert_eq!(wallet.get_utxos()?, chain_utxos);
+        assert!(wallet.get_stxos()?.is_empty());
+        std::fs::remove_dir_all(test_dir)?;
+        Ok(())
     }
 
     #[test]
