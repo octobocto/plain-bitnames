@@ -246,6 +246,18 @@ pub enum Command {
     },
 }
 
+/// Returns the address a resolver reads data from. A resolver reads the ipv4
+/// addr, then the ipv6 addr, then the host.
+fn data_server_address(data: &MutableBitNameData) -> Option<String> {
+    if let Some(socket_addr_v4) = data.socket_addr_v4 {
+        return Some(socket_addr_v4.to_string());
+    }
+    if let Some(socket_addr_v6) = data.socket_addr_v6 {
+        return Some(socket_addr_v6.to_string());
+    }
+    data.socket_addr_host.clone()
+}
+
 async fn resolve_commit<RpcClient>(
     bitname_id: BitName,
     field_name: String,
@@ -255,23 +267,14 @@ where
     RpcClient: ClientT + Sync,
 {
     let bitname_data = rpc_client.bitname_data(bitname_id).await?;
-    let socket_addr = bitname_data
-        .mutable_data
-        .socket_addr_v4
-        .map(SocketAddr::from)
-        .or_else(|| {
-            bitname_data
-                .mutable_data
-                .socket_addr_v6
-                .map(SocketAddr::from)
-        })
+    let address = data_server_address(&bitname_data.mutable_data)
         .ok_or_else(|| anyhow::anyhow!("No IP/port address resolved"))?;
     let commitment = bitname_data
         .mutable_data
         .commitment
         .ok_or_else(|| anyhow::anyhow!("No commitment resolved"))?;
     let http_client =
-        HttpClientBuilder::default().build(format!("http://{socket_addr}"))?;
+        HttpClientBuilder::default().build(format!("http://{address}"))?;
     let mut bitname_commit = http_client.bitname_commit(None).await?;
     let canonical_bytes = serde_json_canonicalizer::to_vec(&bitname_commit)?;
     let canonical_hash: plain_bitnames::types::Hash =
@@ -643,7 +646,7 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, net::SocketAddrV4};
 
     use super::*;
 
@@ -677,5 +680,51 @@ mod tests {
             "500",
         ]);
         assert!(result.is_err());
+    }
+
+    // A resolver reads the ipv4 addr, then the ipv6 addr, then the host.
+    #[test]
+    fn data_server_address_prefers_the_ip() {
+        let host = MutableBitNameData {
+            socket_addr_host: Some("psztorc.com:6002".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            data_server_address(&host).as_deref(),
+            Some("psztorc.com:6002")
+        );
+
+        let both = MutableBitNameData {
+            socket_addr_v4: Some(SocketAddrV4::new(
+                Ipv4Addr::new(203, 0, 113, 7),
+                6002,
+            )),
+            ..host.clone()
+        };
+        assert_eq!(
+            data_server_address(&both).as_deref(),
+            Some("203.0.113.7:6002")
+        );
+
+        assert_eq!(data_server_address(&MutableBitNameData::default()), None);
+    }
+
+    // A register from the command line carries the host onto the chain.
+    #[test]
+    fn parse_register_with_a_host() {
+        let cli = Cli::parse_from([
+            "plain_bitnames_app_cli",
+            "register-bitname",
+            "octobocto",
+            "--socket-addr-host",
+            "seed.alpha.ecash.eu.com:6002",
+        ]);
+        let Command::RegisterBitname { bitname_data, .. } = cli.command else {
+            panic!("expected register-bitname");
+        };
+        assert_eq!(
+            bitname_data.socket_addr_host.as_deref(),
+            Some("seed.alpha.ecash.eu.com:6002")
+        );
     }
 }

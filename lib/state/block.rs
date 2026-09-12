@@ -685,6 +685,7 @@ mod test {
             commitment: Update::Retain,
             socket_addr_v4: Update::Retain,
             socket_addr_v6: Update::Retain,
+            socket_addr_host: Update::Retain,
             encryption_pubkey: Update::Retain,
             signing_pubkey: Update::Retain,
             paymail_fee_sats: Update::Retain,
@@ -778,6 +779,8 @@ mod test {
 
         let mut updates = all_retained_updates();
         updates.commitment = Update::Set([9; 32]);
+        updates.socket_addr_host =
+            Update::Set("seed.alpha.ecash.eu.com:6002".to_owned());
         let update_tx = Transaction {
             inputs: vec![bitname_outpoint],
             outputs: vec![Output::new(address, OutputContent::BitName)],
@@ -806,9 +809,25 @@ mod test {
             rwtxn.commit()?;
         }
 
+        {
+            let rotxn = env.read_txn()?;
+            let data = state.bitnames.get_bitname(&rotxn, &bitname)?.current();
+            anyhow::ensure!(
+                data.mutable_data.socket_addr_host.as_deref()
+                    == Some("seed.alpha.ecash.eu.com:6002")
+            );
+        }
+
         let mut rwtxn = env.write_txn()?;
         let () =
             disconnect_tip(&state, &mut rwtxn, &update_header, &update_body)?;
+        rwtxn.commit()?;
+
+        // A rollback must take the host back out, or a reorg leaves a name
+        // resolving through a server it no longer names.
+        let rotxn = env.read_txn()?;
+        let data = state.bitnames.get_bitname(&rotxn, &bitname)?.current();
+        anyhow::ensure!(data.mutable_data.socket_addr_host.is_none());
         Ok(())
     }
 }

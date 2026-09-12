@@ -40,6 +40,10 @@ pub struct MutableBitNameData {
     #[cfg_attr(feature = "clap", arg(long))]
     #[schema(value_type = Option<String>)]
     pub socket_addr_v6: Option<SocketAddrV6>,
+    /// Optional host and port, such as `psztorc.com:6002`. A resolver reads
+    /// the ipv4 addr, then the ipv6 addr, then this host.
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub socket_addr_host: Option<String>,
     /// Optional pubkey used for encryption
     #[cfg_attr(feature = "clap", arg(long))]
     pub encryption_pubkey: Option<EncryptionPubKey>,
@@ -159,6 +163,18 @@ impl ToSchema for Update<VerifyingKey> {
     }
 }
 
+impl PartialSchema for Update<String> {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        Self::schema(<String as PartialSchema>::schema())
+    }
+}
+
+impl ToSchema for Update<String> {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("UpdateString")
+    }
+}
+
 impl PartialSchema for Update<u64> {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         Self::schema(<u64 as PartialSchema>::schema())
@@ -183,6 +199,9 @@ pub struct BitNameDataUpdates {
     /// optional ipv6 addr
     #[schema(schema_with = <Update<SocketAddrV6> as PartialSchema>::schema)]
     pub socket_addr_v6: Update<SocketAddrV6>,
+    /// optional host and port, such as `psztorc.com:6002`
+    #[schema(schema_with = <Update<String> as PartialSchema>::schema)]
+    pub socket_addr_host: Update<String>,
     /// optional pubkey used for encryption
     #[schema(schema_with = <Update<EncryptionPubKey> as PartialSchema>::schema)]
     pub encryption_pubkey: Update<EncryptionPubKey>,

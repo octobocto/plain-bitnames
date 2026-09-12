@@ -31,6 +31,7 @@ fn show_bitname_data(
         commitment,
         socket_addr_v4,
         socket_addr_v6,
+        socket_addr_host,
         encryption_pubkey,
         signing_pubkey,
         paymail_fee_sats,
@@ -44,6 +45,7 @@ fn show_bitname_data(
         .map_or("Not set".to_owned(), |socket_addr_v6| {
             socket_addr_v6.to_string()
         });
+    let socket_addr_host = socket_addr_host.as_deref().unwrap_or("Not set");
     let encryption_pubkey =
         encryption_pubkey.map_or("Not set".to_owned(), |epk| epk.to_string());
     let signing_pubkey =
@@ -72,6 +74,13 @@ fn show_bitname_data(
             ui.monospace_selectable_singleline(
                 false,
                 format!("IPv6 Address: {socket_addr_v6}"),
+            )
+        })
+        .join()
+        | ui.horizontal(|ui| {
+            ui.monospace_selectable_singleline(
+                false,
+                format!("Host Address: {socket_addr_host}"),
             )
         })
         .join()
