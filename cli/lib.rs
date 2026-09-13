@@ -260,24 +260,23 @@ where
     RpcClient: ClientT + Sync,
 {
     let bitname_data = rpc_client.bitname_data(bitname_id).await?;
-    let host = bitname_data
+    let socket_addr = bitname_data
         .mutable_data
         .socket_addr_v4
-        .map(|socket_addr| SocketAddr::from(socket_addr).to_string())
+        .map(SocketAddr::from)
         .or_else(|| {
             bitname_data
                 .mutable_data
                 .socket_addr_v6
-                .map(|socket_addr| SocketAddr::from(socket_addr).to_string())
+                .map(SocketAddr::from)
         })
-        .or_else(|| bitname_data.mutable_data.socket_addr_host.clone())
         .ok_or_else(|| anyhow::anyhow!("No IP/port address resolved"))?;
     let commitment = bitname_data
         .mutable_data
         .commitment
         .ok_or_else(|| anyhow::anyhow!("No commitment resolved"))?;
     let http_client =
-        HttpClientBuilder::default().build(format!("http://{host}"))?;
+        HttpClientBuilder::default().build(format!("http://{socket_addr}"))?;
     let mut bitname_commit = http_client.bitname_commit(None).await?;
     let canonical_bytes = serde_json_canonicalizer::to_vec(&bitname_commit)?;
     let canonical_hash: plain_bitnames::types::Hash =
