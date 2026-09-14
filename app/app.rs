@@ -346,9 +346,16 @@ impl App {
         &self,
         tx: &plain_bitnames::types::AuthorizedTransaction,
     ) -> Result<(), Error> {
-        self.node.submit_transaction(tx)?;
+        self.broadcast_transaction(tx).map(|_| ())
+    }
+
+    pub fn broadcast_transaction(
+        &self,
+        tx: &plain_bitnames::types::AuthorizedTransaction,
+    ) -> Result<plain_bitnames::types::BroadcastResult, Error> {
+        let result = self.node.broadcast_transaction(tx);
         let () = self.update()?;
-        Ok(())
+        result.map_err(Error::from)
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {

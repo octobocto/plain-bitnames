@@ -111,6 +111,7 @@ pub struct PeerResponseItem {
 #[must_use]
 #[derive(Debug)]
 pub enum Info {
+    Connected,
     Error {
         err: ConnectionError,
         resolved_peer_addr: ResolvedPeerAddress,

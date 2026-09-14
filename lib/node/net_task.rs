@@ -466,6 +466,73 @@ struct NetTask {
 }
 
 impl NetTask {
+    fn relay_transaction(
+        ctxt: &NetTaskContext,
+        target: Option<SocketAddr>,
+        mut exclude: HashSet<SocketAddr>,
+        transaction: &crate::types::AuthorizedTransaction,
+    ) -> Result<(), Error> {
+        loop {
+            match ctxt.net.push_tx(target, exclude.clone(), transaction) {
+                Ok(_) => return Ok(()),
+                Err(net::Error::SendTransaction { address, .. }) => {
+                    exclude.insert(address);
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+
+    fn relay_mempool(
+        ctxt: &NetTaskContext,
+        target: Option<SocketAddr>,
+    ) -> Result<(), Error> {
+        let transactions = {
+            let mut rwtxn = ctxt.env.write_txn()?;
+            let mut valid = Vec::new();
+            for transaction in ctxt.mempool.take_all(&rwtxn)? {
+                match ctxt.state.validate_transaction(&rwtxn, &transaction) {
+                    Ok(_) => valid.push(transaction),
+                    Err(
+                        err @ (state::Error::Db(_)
+                        | state::Error::BitName(
+                            state::error::BitName::Db(_),
+                        )
+                        | state::Error::BorshSerialize(_)),
+                    ) => {
+                        return Err(err.into());
+                    }
+                    Err(err) => {
+                        let txid = transaction.transaction.txid();
+                        ctxt.mempool.delete(&mut rwtxn, txid)?;
+                        tracing::debug!(%txid, error = %err, "Remove invalid transaction from the mempool");
+                    }
+                }
+            }
+            rwtxn.commit()?;
+            valid
+        };
+        for transaction in transactions {
+            Self::relay_transaction(
+                ctxt,
+                target,
+                HashSet::new(),
+                &transaction,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn relay_interval() -> impl futures::Stream<Item = ()> {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        stream::unfold(interval, async |mut interval| {
+            interval.tick().await;
+            Some(((), interval))
+        })
+    }
+
     fn handle_response(
         ctxt: &NetTaskContext,
         // Attempt to switch to a descendant tip once a body has been
@@ -981,6 +1048,7 @@ impl NetTask {
             ReconnectPeer(ResolvedPeerAddress),
             // The loop that dials known peers stopped on an error
             RedialKnownPeers(Box<net::Error>),
+            RelayTransactions,
         }
         let accept_connections = stream::try_unfold((), |()| {
             let env = self.ctxt.env.clone();
@@ -1044,6 +1112,8 @@ impl NetTask {
             .filter_map(async |res| res.err().map(Box::new))
             .map(MailboxItem::RedialKnownPeers)
         };
+        let relay_transactions_stream =
+            Self::relay_interval().map(|()| MailboxItem::RelayTransactions);
         let mut mailbox_stream = stream::select_all([
             accept_connections.boxed(),
             forward_request_stream.boxed(),
@@ -1052,6 +1122,7 @@ impl NetTask {
             peer_info_stream.boxed(),
             reconnect_peer_stream.boxed(),
             redial_known_peers_stream.boxed(),
+            relay_transactions_stream.boxed(),
         ]);
         // Attempt to switch to a descendant tip once a body has been
         // stored, if all other ancestor bodies are available.
@@ -1069,6 +1140,9 @@ impl NetTask {
         while let Some(mailbox_item) = mailbox_stream.next().await {
             tracing::trace!(?mailbox_item, "received new mailbox item");
             match mailbox_item {
+                MailboxItem::RelayTransactions => {
+                    Self::relay_mempool(&self.ctxt, None)?;
+                }
                 MailboxItem::AcceptConnection(res) => match res {
                     // We received a connection new incoming network connection, but no peer
                     // was added
@@ -1300,12 +1374,21 @@ impl NetTask {
                                     )
                                 })?;
                         }
+                        PeerConnectionInfo::Connected => {
+                            Self::relay_mempool(&self.ctxt, Some(addr))?;
+                        }
                         PeerConnectionInfo::NewTransaction(new_tx) => {
                             let mut rwtxn = self
                                 .ctxt
                                 .env
                                 .write_txn()
                                 .map_err(EnvError::from)?;
+                            if self.ctxt.mempool.transactions.try_get(
+                                &rwtxn,
+                                &new_tx.transaction.txid(),
+                            ).map_err(DbError::from)?.is_some() {
+                                continue;
+                            }
                             match self.ctxt.mempool.put(&mut rwtxn, &new_tx) {
                                 Ok(()) => (),
                                 Err(crate::mempool::Error::UtxoDoubleSpent) => {
@@ -1320,10 +1403,12 @@ impl NetTask {
                             }
                             rwtxn.commit().map_err(RwTxnError::from)?;
                             // broadcast
-                            let () = self
-                                .ctxt
-                                .net
-                                .push_tx(HashSet::from_iter([addr]), &new_tx);
+                            Self::relay_transaction(
+                                &self.ctxt,
+                                None,
+                                HashSet::from_iter([addr]),
+                                &new_tx,
+                            )?;
                         }
                         PeerConnectionInfo::Response(boxed) => {
                             let (resp, req) = *boxed;
@@ -1466,6 +1551,10 @@ impl Drop for NetTaskHandle {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
+    use futures::StreamExt as _;
+
     use crate::{
         node::net_task::{Error, is_fatal_reorg_error},
         state,
@@ -1482,6 +1571,26 @@ mod test {
     #[test]
     fn infrastructure_error_is_fatal() {
         assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transaction_relay_interval_is_sixty_seconds() {
+        let mut interval = super::NetTask::relay_interval().boxed();
+        assert_eq!(interval.next().await, Some(()));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(59), interval.next())
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(interval.next().await, Some(()));
+        tokio::time::advance(Duration::from_secs(300)).await;
+        assert_eq!(interval.next().await, Some(()));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), interval.next())
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -1520,6 +1629,102 @@ mod peer_retry_test {
         )
         .await?;
         Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn transaction_rejection_keeps_the_sync_connection() -> anyhow::Result<()> {
+        use futures::StreamExt as _;
+        use heed::types::SerdeBincode;
+        use sneed::DatabaseUnique;
+
+        use super::{NetTask, NetTaskContext};
+        use crate::{
+            net::{Net, PeerConnectionInfo, PeerInfoRx, PeerResponse},
+            node::broadcast_test,
+            types::{FilledOutput, OutPointKey},
+        };
+
+        async fn response(
+            info_rx: &mut PeerInfoRx,
+        ) -> anyhow::Result<PeerResponse> {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let (_, info) = info_rx
+                        .next()
+                        .await
+                        .context("The peer stream closed")?;
+                    match info.context("The peer connection closed")? {
+                        PeerConnectionInfo::Response(response) => {
+                            return Ok(response.0);
+                        }
+                        PeerConnectionInfo::Error { err, .. } => {
+                            return Err(err.into());
+                        }
+                        _ => (),
+                    }
+                }
+            })
+            .await?
+        }
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let sender_dir = temp_dir::TempDir::new()?;
+            let receiver_dir = temp_dir::TempDir::new()?;
+            let (mut sender, _) = broadcast_test::node(&runtime, sender_dir.path()).await?;
+            let (receiver, receiver_address) = broadcast_test::node(&runtime, receiver_dir.path()).await?;
+            sender.net_task.task.abort();
+            while !sender.net_task.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let (net, mut info_rx, _dial) = Net::new(
+                runtime.handle(),
+                &sender.env,
+                sender.archive.clone(),
+                None,
+                Network::Regtest,
+                sender.state.clone(),
+                (Ipv4Addr::LOCALHOST, 0).into(),
+                HashSet::new(),
+                HashSet::new(),
+            )?;
+            sender.net = net;
+            let transaction = broadcast_test::transaction(&[&sender], sender_dir.path())?;
+            let txid = transaction.transaction.txid();
+            assert_eq!(sender.broadcast_transaction(&transaction)?.peer_count, 0);
+            sender.connect_peer(receiver_address.into())?;
+            let (_, info) = tokio::time::timeout(Duration::from_secs(5), info_rx.next())
+                .await?.context("The peer stream closed")?;
+            assert!(matches!(info, Some(PeerConnectionInfo::Connected)));
+            let context = NetTaskContext {
+                env: sender.env.clone(),
+                archive: sender.archive.clone(),
+                mainchain_task: sender.mainchain_task.clone(),
+                mempool: sender.mempool.clone(),
+                net: sender.net.clone(),
+                state: sender.state.clone(),
+                #[cfg(feature = "zmq")]
+                zmq_pub_handler: sender.zmq_pub_handler.clone(),
+            };
+            NetTask::relay_mempool(&context, Some(receiver_address))?;
+            assert!(matches!(response(&mut info_rx).await?, PeerResponse::TransactionRejected(id) if id == txid));
+            assert!(receiver.get_all_transactions()?.is_empty());
+
+            let mut rwtxn = receiver.env.write_txn()?;
+            let utxos = DatabaseUnique::<OutPointKey, SerdeBincode<FilledOutput>>::create(
+                &receiver.env, &mut rwtxn, "utxos",
+            )?;
+            for (outpoint, output) in sender.get_all_utxos()? {
+                utxos.put(&mut rwtxn, &OutPointKey::from(&outpoint), &output)?;
+            }
+            rwtxn.commit()?;
+            NetTask::relay_mempool(&context, Some(receiver_address))?;
+            assert!(matches!(response(&mut info_rx).await?, PeerResponse::TransactionAccepted(id) if id == txid));
+            broadcast_test::wait_for_transaction(&receiver, txid).await?;
+            assert_eq!(sender.get_active_peers().len(), 1);
+            assert_eq!(receiver.get_active_peers().len(), 1);
+            Ok(())
+        })
     }
 
     #[test]

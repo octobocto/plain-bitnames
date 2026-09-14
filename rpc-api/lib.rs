@@ -27,7 +27,7 @@ pub mod node {
         Address, Authorization, Authorized, BatchIcannRegistrationData,
         BitNameData, BitNameDataUpdates, BitNameSeqId, BitcoinOutputContent,
         Block, BlockHash, BlockIndex, BlockIndexDeposit, BlockIndexSpend,
-        BlockIndexTx, Body, EncryptionPubKey, FilledOutput,
+        BlockIndexTx, Body, BroadcastResult, EncryptionPubKey, FilledOutput,
         FilledOutputContent, Header, InPoint, M6id, MainchainSyncPhase,
         MainchainSyncProgress, MempoolTx, MerkleRoot, MutableBitNameData,
         OutPoint, Output, OutputContent, PointedOutput, SpentOutput,
@@ -101,6 +101,14 @@ pub mod node {
     ])]
     #[rpc(client, server, server_bounds(Self: open_api::RpcServer))]
     pub trait Rpc {
+        /// Validate and relay a signed transaction. Zero peers permits a later retry.
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "broadcast_transaction")]
+        async fn broadcast_transaction(
+            &self,
+            transaction: Authorized<Transaction>,
+        ) -> RpcResult<BroadcastResult>;
+
         /// Retrieve data for a single BitName
         #[method(name = "bitname_data")]
         async fn bitname_data(
@@ -200,6 +208,13 @@ pub mod node {
             txid: Txid,
         ) -> RpcResult<Option<Transaction>>;
 
+        /// Get a signed transaction from the mempool or block archive.
+        #[method(name = "get_authorized_transaction")]
+        async fn get_authorized_transaction(
+            &self,
+            txid: Txid,
+        ) -> RpcResult<Option<Authorized<Transaction>>>;
+
         /// Get information about a transaction in the current chain
         #[method(name = "get_transaction_info")]
         async fn get_transaction_info(
@@ -263,6 +278,14 @@ pub mod node {
         async fn pending_withdrawal_bundle(
             &self,
         ) -> RpcResult<Option<WithdrawalBundle>>;
+
+        /// Relay a mempool transaction with its stored signatures.
+        #[open_api_method(output_schema(ToSchema))]
+        #[method(name = "rebroadcast_transaction")]
+        async fn rebroadcast_transaction(
+            &self,
+            txid: Txid,
+        ) -> RpcResult<BroadcastResult>;
 
         /// Get total sidechain wealth in sats
         #[method(name = "sidechain_wealth")]

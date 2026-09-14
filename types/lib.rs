@@ -180,6 +180,13 @@ pub struct MempoolTx {
     pub tx: transaction::Transaction,
 }
 
+/// The transaction ID and the number of connected peer queues that accepted it.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BroadcastResult {
+    pub txid: Txid,
+    pub peer_count: usize,
+}
+
 /// Step of the startup sync with the mainchain
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema,

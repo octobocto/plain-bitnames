@@ -21,9 +21,9 @@ use crate::{
     types::{
         Address, AmountOverflowError, AmountUnderflowError, Authorized,
         AuthorizedTransaction, BitName, BitNameData, Block, BlockHash,
-        BlockIndexEvents, BmmResult, Body, FilledOutput, FilledTransaction,
-        GetValue, Header, MainchainSyncProgress, Network, OutPoint,
-        OutPointKey, SpentOutput, Tip, Transaction, TxIn, Txid,
+        BlockIndexEvents, BmmResult, Body, BroadcastResult, FilledOutput,
+        FilledTransaction, GetValue, Header, MainchainSyncProgress, Network,
+        OutPoint, OutPointKey, SpentOutput, Tip, Transaction, TxIn, Txid,
         WithdrawalBundle,
         net::{Peer, PeerAddress, ResolvedPeerAddress},
         proto::{self, mainchain},
@@ -37,6 +37,8 @@ mod mainchain_task;
 use mainchain_task::MainchainTaskHandle;
 mod net_task;
 use net_task::NetTaskHandle;
+#[cfg(test)]
+mod broadcast_test;
 #[cfg(feature = "zmq")]
 use net_task::ZmqPubHandler;
 
@@ -338,14 +340,48 @@ where
         &self,
         transaction: &AuthorizedTransaction,
     ) -> Result<(), Error> {
-        {
+        self.broadcast_transaction(transaction).map(|_| ())
+    }
+
+    /// Validate and relay a transaction without a change to its signatures.
+    pub fn broadcast_transaction(
+        &self,
+        transaction: &AuthorizedTransaction,
+    ) -> Result<BroadcastResult, Error> {
+        let txid = transaction.transaction.txid();
+        let transaction = {
             let mut rwtxn = self.env.write_txn()?;
             self.state.validate_transaction(&rwtxn, transaction)?;
-            self.mempool.put(&mut rwtxn, transaction)?;
+            let stored = self
+                .mempool
+                .transactions
+                .try_get(&rwtxn, &txid)
+                .map_err(mempool::Error::from)?;
+            if stored.is_none() {
+                self.mempool.put(&mut rwtxn, transaction)?;
+            }
             rwtxn.commit().map_err(RwTxnError::from)?;
-        }
-        self.net.push_tx(Default::default(), transaction);
-        Ok(())
+            stored.unwrap_or_else(|| transaction.clone())
+        };
+        let peer_count =
+            self.net.push_tx(None, Default::default(), &transaction)?;
+        Ok(BroadcastResult { txid, peer_count })
+    }
+
+    /// Relay a transaction from the mempool with its stored signatures.
+    pub fn rebroadcast_transaction(
+        &self,
+        txid: Txid,
+    ) -> Result<BroadcastResult, Error> {
+        let transaction = {
+            let rotxn = self.env.read_txn()?;
+            self.mempool
+                .transactions
+                .try_get(&rotxn, &txid)
+                .map_err(mempool::Error::from)?
+                .ok_or(mempool::Error::MissingTransaction(txid))?
+        };
+        self.broadcast_transaction(&transaction)
     }
 
     pub fn get_all_stxos(
@@ -614,6 +650,31 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    /// Get a signed transaction from the mempool or block archive.
+    pub fn get_authorized_transaction(
+        &self,
+        txid: Txid,
+    ) -> Result<Option<AuthorizedTransaction>, Error> {
+        let rotxn = self.env.read_txn()?;
+        if let Some(transaction) = self
+            .mempool
+            .transactions
+            .try_get(&rotxn, &txid)
+            .map_err(mempool::Error::from)?
+        {
+            return Ok(Some(transaction));
+        }
+        let inclusions = self.archive.get_tx_inclusions(&rotxn, txid)?;
+        let Some((block_hash, index)) = inclusions.first_key_value() else {
+            return Ok(None);
+        };
+        let body = self.archive.get_body(&rotxn, *block_hash)?;
+        Ok(body
+            .authorized_transactions()
+            .into_iter()
+            .nth(*index as usize))
     }
 
     /// get a filled transaction from the archive/state or mempool,
