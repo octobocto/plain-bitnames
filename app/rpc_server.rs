@@ -10,9 +10,10 @@ use jsonrpsee::{
 use plain_bitnames::{
     authorization::{self, Dst, Signature},
     types::{
-        Address, Authorization, BitName, BitNameData, Block, BlockHash,
-        EncryptionPubKey, FilledOutput, MutableBitNameData, PointedOutput,
-        SpentOutput, Transaction, Txid, VerifyingKey, WithdrawalBundle,
+        Address, Authorization, AuthorizedTransaction, BitName, BitNameData,
+        Block, BlockHash, BroadcastResult, EncryptionPubKey, FilledOutput,
+        MutableBitNameData, PointedOutput, SpentOutput, Transaction, Txid,
+        VerifyingKey, WithdrawalBundle,
         keys::{Ecies, XEncryptionSecretKey, XVerifyingKey},
         net::{Peer, PeerAddress},
         wallet::{Balance, TransferDests},
@@ -272,6 +273,35 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         txid: Txid,
     ) -> RpcResult<Option<Transaction>> {
         self.app.node.try_get_transaction(txid).map_err(custom_err)
+    }
+
+    async fn get_authorized_transaction(
+        &self,
+        txid: Txid,
+    ) -> RpcResult<Option<AuthorizedTransaction>> {
+        self.app
+            .node
+            .get_authorized_transaction(txid)
+            .map_err(custom_err)
+    }
+
+    async fn broadcast_transaction(
+        &self,
+        transaction: AuthorizedTransaction,
+    ) -> RpcResult<BroadcastResult> {
+        self.app
+            .broadcast_transaction(&transaction)
+            .map_err(custom_err)
+    }
+
+    async fn rebroadcast_transaction(
+        &self,
+        txid: Txid,
+    ) -> RpcResult<BroadcastResult> {
+        self.app
+            .node
+            .rebroadcast_transaction(txid)
+            .map_err(custom_err)
     }
 
     async fn get_transaction_info(

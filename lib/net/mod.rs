@@ -694,32 +694,32 @@ impl Net {
     /// Push a tx to all active peers, except those in the provided set
     pub fn push_tx(
         &self,
+        target: Option<SocketAddr>,
         exclude: HashSet<SocketAddr>,
         tx: &AuthorizedTransaction,
-    ) {
-        self.active_peers
-            .read()
-            .iter()
-            .filter(|(addr, _)| !exclude.contains(addr))
-            .for_each(|(addr, peer_connection_handle)| {
-                match peer_connection_handle.connection_status() {
-                    PeerConnectionStatus::Connecting => {
-                        tracing::trace!(%addr, "skipping peer at {addr} because it is not fully connected");
-                        return;
-                    }
-                    PeerConnectionStatus::Connected => {}
-                }
-                let request: PeerRequest = peer::message::PushTransactionRequest {
-                    transaction: tx.clone(),
-                }.into();
-                if let Err(_send_err) = peer_connection_handle
-                    .internal_message_tx
-                    .unbounded_send(request.into())
-                {
-                    let txid = tx.transaction.txid();
-                    tracing::warn!("Failed to push tx {txid} to peer at {addr}")
-                }
-            })
+    ) -> Result<usize, Error> {
+        let peers = self.active_peers.read();
+        let mut peer_count = 0;
+        for (address, peer) in peers.iter() {
+            if target.is_some_and(|target| target != *address)
+                || exclude.contains(address)
+                || peer.connection_status() == PeerConnectionStatus::Connecting
+            {
+                continue;
+            }
+            let request: PeerRequest = peer::message::PushTransactionRequest {
+                transaction: tx.clone(),
+            }
+            .into();
+            peer.internal_message_tx
+                .unbounded_send(request.into())
+                .map_err(|err| Error::SendTransaction {
+                    address: *address,
+                    source: err.into_send_error(),
+                })?;
+            peer_count += 1;
+        }
+        Ok(peer_count)
     }
 }
 

@@ -700,7 +700,12 @@ impl ConnectionTask {
                     ResponseMessage::TransactionRejected(txid),
                 )
                 .await?;
-                Err(Error::from(err))
+                if matches!(err, crate::state::Error::NoUtxo(_)) {
+                    tracing::debug!(%txid, error = %err, "Reject peer transaction");
+                    Ok(())
+                } else {
+                    Err(Error::from(err))
+                }
             }
             Ok(_) => {
                 Connection::send_response(
@@ -859,6 +864,9 @@ impl ConnectionTask {
     }
 
     pub async fn run(self) -> Result<(), Error> {
+        self.info_tx
+            .unbounded_send(Info::Connected)
+            .map_err(|_| Error::SendInfo)?;
         let ctxt = Arc::new(self.ctxt);
         // current peer state
         let mut peer_state = Option::<PeerStateId>::None;

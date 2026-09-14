@@ -108,9 +108,37 @@ async fn list_mempool_task(
         entry.raw == const_hex::encode(entry.tx.canonical_encoding())
     );
 
+    let signed = sidechain
+        .rpc_client
+        .get_authorized_transaction(txid)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("The signed transaction is absent"))?;
+    let signed_bytes = signed.transaction.canonical_encoding();
+    let authorizations = signed.authorizations.clone();
+    let result = sidechain
+        .rpc_client
+        .broadcast_transaction(signed.clone())
+        .await?;
+    anyhow::ensure!(result.txid == txid);
+    let result = sidechain.rpc_client.rebroadcast_transaction(txid).await?;
+    anyhow::ensure!(result.txid == txid);
+    anyhow::ensure!(
+        sidechain.rpc_client.submit_transaction(signed).await? == txid
+    );
+    anyhow::ensure!(sidechain.rpc_client.list_mempool().await?.len() == 1);
+
     tracing::debug!("Checking that a block empties the mempool");
     let () = sidechain.bmm_single(&mut enforcer_post_setup).await?;
     anyhow::ensure!(sidechain.rpc_client.list_mempool().await?.is_empty());
+    let archived = sidechain
+        .rpc_client
+        .get_authorized_transaction(txid)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("The signed archive transaction is absent")
+        })?;
+    anyhow::ensure!(archived.transaction.canonical_encoding() == signed_bytes);
+    anyhow::ensure!(archived.authorizations == authorizations);
 
     drop(sidechain);
     tracing::info!(

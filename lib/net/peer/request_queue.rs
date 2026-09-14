@@ -147,15 +147,15 @@ impl Sender {
             .map_err(|_| error::request_queue::SendHeartbeat)
     }
 
-    /// Returns `Ok(true)` if the request was sent. Requests may be ignored if they
-    /// are duplicates of messages that have already been sent.
-    /// Returns `Ok(false)` if the request was ignored.
+    /// Queue a request. Repeated block requests return false; transaction requests permit retries.
     pub fn send_request(
         &self,
         request: Request,
     ) -> Result<bool, error::request_queue::SendRequest> {
         let request_hash = hash(&request);
-        if self.request_hashes.lock().insert(request_hash) {
+        if matches!(request, Request::PushTransaction(_))
+            || self.request_hashes.lock().insert(request_hash)
+        {
             let () = self
                 .request_tx
                 .unbounded_send(request)
@@ -182,4 +182,35 @@ pub fn new() -> (Sender, ErrorRx) {
         rate_limiter: Arc::new(rate_limiter),
     };
     (sender, error_rx)
+}
+
+#[cfg(test)]
+mod test {
+    use super::new;
+    use crate::{
+        net::peer::message::{GetBlockRequest, PushTransactionRequest},
+        types::{AuthorizedTransaction, Transaction},
+    };
+
+    #[test]
+    fn transaction_requests_permit_retries() -> anyhow::Result<()> {
+        let (sender, _receiver) = new();
+        let request = PushTransactionRequest {
+            transaction: AuthorizedTransaction {
+                transaction: Transaction::default(),
+                authorizations: Vec::new(),
+            },
+        };
+        assert!(sender.send_request(request.clone().into())?);
+        assert!(sender.send_request(request.into())?);
+        let request = GetBlockRequest {
+            block_hash: [1; 32].into(),
+            descendant_tip: None,
+            ancestor: None,
+            peer_state_id: None,
+        };
+        assert!(sender.send_request(request.clone().into())?);
+        assert!(!sender.send_request(request.into())?);
+        Ok(())
+    }
 }

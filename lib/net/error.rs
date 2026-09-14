@@ -168,6 +168,11 @@ pub enum Error {
     ReadToEnd(#[from] quinn::ReadToEndError),
     #[error("send datagram error")]
     SendDatagram(#[from] quinn::SendDatagramError),
+    #[error("Failed to queue transaction for peer {address}")]
+    SendTransaction {
+        address: SocketAddr,
+        source: futures::channel::mpsc::SendError,
+    },
     #[error("write error")]
     Write(#[from] quinn::WriteError),
 }
