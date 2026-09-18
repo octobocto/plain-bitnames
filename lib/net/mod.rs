@@ -165,13 +165,17 @@ const SIGNET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
     &[SIGNET_MINING_SERVER, BIP300_XYZ]
 };
 
-const ALPHANET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
-    // The alphanet server runs a node for this chain.
-    const ALPHANET_SERVER: PeerAddress<&'static str> = PeerAddress {
-        host: url::Host::Ipv4(Ipv4Addr::new(204, 168, 254, 113)),
+const BETANET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
+    // The betanet servers run a node for this chain.
+    const DRIVECHA_IN: PeerAddress<&'static str> = PeerAddress {
+        host: url::Host::Domain("seed.beta.ecash.drivecha.in"),
         port: DEFAULT_PORT,
     };
-    &[ALPHANET_SERVER]
+    const ECASH_NINJA: PeerAddress<&'static str> = PeerAddress {
+        host: url::Host::Domain("seed.beta.ecash.ninja"),
+        port: DEFAULT_PORT,
+    };
+    &[DRIVECHA_IN, ECASH_NINJA]
 };
 
 const FORKNET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
@@ -187,10 +191,10 @@ const fn seed_peer_addrs(
     network: Network,
 ) -> &'static [PeerAddress<&'static str>] {
     match network {
-        Network::Alphanet => ALPHANET_SEED_PEER_ADDRS,
-        Network::Signet => SIGNET_SEED_PEER_ADDRS,
-        Network::Regtest => &[],
+        Network::Betanet => BETANET_SEED_PEER_ADDRS,
         Network::Forknet => FORKNET_SEED_PEER_ADDRS,
+        Network::Regtest => &[],
+        Network::Signet => SIGNET_SEED_PEER_ADDRS,
     }
 }
 
