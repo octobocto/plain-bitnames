@@ -1,13 +1,15 @@
 //! Wallet errors
 
 use libes::EciesError;
+use std::path::PathBuf;
+
 use sneed::{db::error as db, env::error as env, rwtxn::error as rwtxn};
 use thiserror::Error;
 use transitive::Transitive;
 
 use crate::types::{
     Address, AmountOverflowError, AmountUnderflowError, EncryptionPubKey,
-    VerifyingKey,
+    VerifyingKey, Version,
 };
 
 #[derive(Debug, Error)]
@@ -97,6 +99,12 @@ pub struct VkDoesNotExist {
     from(rwtxn::Commit, rwtxn::Error)
 )]
 pub enum Error {
+    #[error(
+        "Incompatible DB version ({}). Please clear the DB (`{}`) and re-sync",
+        .version,
+        .db_path.display()
+    )]
+    IncompatibleVersion { version: Version, db_path: PathBuf },
     #[error("address {address} does not exist")]
     AddressDoesNotExist { address: crate::types::Address },
     #[error(transparent)]
