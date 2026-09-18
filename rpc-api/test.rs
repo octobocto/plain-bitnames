@@ -335,7 +335,7 @@ fn paymail_rpc_returns_nonempty_outputs() -> anyhow::Result<()> {
             vout: 2,
         },
         OutPoint::Coinbase {
-            merkle_root: [2; 32].into(),
+            txid: [2; 32].into(),
             vout: 3,
         },
         OutPoint::Deposit(bitcoin::OutPoint {

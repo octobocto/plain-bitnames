@@ -12,7 +12,7 @@ use crate::{
     Address, AmountOverflowError, AmountUnderflowError, BitNameDataUpdates,
     ComputeFeeError, GetFeeError, GetValue, MutableBitNameData,
     authorization::{Authorization, Signature},
-    hashes::{self, BitName, Hash, M6id, MerkleRoot, Txid},
+    hashes::{self, BitName, CoinbaseTxid, Hash, M6id, Txid},
     util,
 };
 
@@ -45,7 +45,7 @@ pub enum OutPoint {
     },
     // Created by block bodies.
     Coinbase {
-        merkle_root: MerkleRoot,
+        txid: CoinbaseTxid,
         vout: u32,
     },
     // Created by mainchain deposits.
@@ -63,8 +63,8 @@ impl std::fmt::Display for OutPoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Regular { txid, vout } => write!(f, "regular {txid} {vout}"),
-            Self::Coinbase { merkle_root, vout } => {
-                write!(f, "coinbase {merkle_root} {vout}")
+            Self::Coinbase { txid, vout } => {
+                write!(f, "coinbase {txid} {vout}")
             }
             Self::Deposit(bitcoin::OutPoint { txid, vout }) => {
                 write!(f, "deposit {txid} {vout}")
@@ -207,7 +207,7 @@ mod test {
                 vout: u32::MAX,
             },
             OutPoint::Coinbase {
-                merkle_root: Default::default(),
+                txid: Default::default(),
                 vout: u32::MAX,
             },
             OutPoint::Deposit(bitcoin::OutPoint {
@@ -312,6 +312,12 @@ pub struct Output {
 }
 
 impl Output {
+    /// Canonical size in bytes. The canonical encoding is the form that the
+    /// merkle root commits to.
+    pub(crate) fn canonical_size(&self) -> u64 {
+        borsh::object_length(self).unwrap_or(0) as u64
+    }
+
     pub fn new(address: Address, content: Content) -> Self {
         Self {
             address,
@@ -434,7 +440,7 @@ impl Transaction {
     /// Canonical size in bytes. The canonical encoding is used for hashing,
     /// But other encodings may be used at eg. networking, rpc levels.
     pub fn canonical_size(&self) -> u64 {
-        (borsh::object_length(self).unwrap() / 8) as u64
+        borsh::object_length(self).unwrap() as u64
     }
 
     /// Canonical encoding. This is the form the txid hashes over.

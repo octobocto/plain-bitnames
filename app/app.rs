@@ -625,6 +625,10 @@ impl App {
                     )),
                 )],
             };
+            let coinbase = types::Coinbase {
+                memo: Vec::new(),
+                outputs: coinbase,
+            };
             let merkle_root = Body::compute_merkle_root(&coinbase, &txs)?;
             let body = Body::new(
                 txs.into_iter().map(|tx| tx.into()).collect(),
@@ -644,7 +648,7 @@ impl App {
             });
             (bribe, header, body, tx_fees)
         } else {
-            let coinbase = Vec::new();
+            let coinbase = types::Coinbase::default();
             let merkle_root = Body::compute_merkle_root::<
                 types::FilledTransaction,
             >(&coinbase, &[])?;

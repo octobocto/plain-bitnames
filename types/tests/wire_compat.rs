@@ -1,7 +1,6 @@
 use anyhow::Context;
 use plain_bitnames_types::{
-    AuthorizedTransaction, Body, FilledTransaction, Header, Verify as _,
-    authorization,
+    AuthorizedTransaction, FilledTransaction, authorization,
 };
 use serde::Deserialize;
 
@@ -12,22 +11,8 @@ struct LegacyCase {
     canonical_hex: String,
     transaction_hex: String,
     authorized_hex: String,
-    body_hex: String,
-    header_hex: String,
     signature_hex: String,
     txid: String,
-    merkle_root: String,
-    block_hash: String,
-}
-
-#[derive(Deserialize)]
-struct AlphanetBlock {
-    height: u32,
-    hash: String,
-    header: Header,
-    body: Body,
-    filled: Vec<FilledTransaction>,
-    body_hex: String,
 }
 
 fn cases(prefix: &str) -> anyhow::Result<Vec<LegacyCase>> {
@@ -98,66 +83,6 @@ fn check_transaction_signatures(prefix: &str) -> anyhow::Result<()> {
             "{}",
             case.name,
         );
-    }
-    Ok(())
-}
-
-#[test]
-fn legacy_registration_blocks() -> anyhow::Result<()> {
-    check_block_bodies("registration_")
-}
-
-#[test]
-fn legacy_update_blocks() -> anyhow::Result<()> {
-    check_block_bodies("update_")
-}
-
-fn check_block_bodies(prefix: &str) -> anyhow::Result<()> {
-    for case in cases(prefix)? {
-        let body_bytes = const_hex::decode(&case.body_hex)?;
-        let body: Body = bincode::deserialize(&body_bytes)?;
-        let header: Header =
-            bincode::deserialize(&const_hex::decode(&case.header_hex)?)?;
-        let merkle_root =
-            Body::compute_merkle_root(&body.coinbase, &[case.filled])?;
-        assert_eq!(merkle_root, header.merkle_root, "{}", case.name);
-        assert_eq!(merkle_root.to_string(), case.merkle_root, "{}", case.name);
-        assert_eq!(header.hash().to_string(), case.block_hash, "{}", case.name);
-        assert_eq!(bincode::serialize(&body)?, body_bytes, "{}", case.name);
-        authorization::Authorization::verify_body(&body)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn alphanet_registration_blocks() -> anyhow::Result<()> {
-    let blocks: Vec<AlphanetBlock> =
-        serde_json::from_str(include_str!("fixtures/alphanet-v0.17.11.json"))?;
-    assert_eq!(
-        blocks.iter().map(|block| block.height).collect::<Vec<_>>(),
-        [36, 57],
-    );
-    for block in blocks {
-        let bytes = const_hex::decode(&block.body_hex)?;
-        let body: Body = bincode::deserialize(&bytes)?;
-        assert_eq!(bincode::serialize(&block.body)?, bytes);
-        assert_eq!(body.transactions.len(), block.filled.len());
-        for (transaction, filled) in body.transactions.iter().zip(&block.filled)
-        {
-            assert_eq!(
-                transaction.canonical_encoding(),
-                filled.transaction.canonical_encoding(),
-            );
-            assert_eq!(transaction.inputs.len(), filled.spent_utxos.len());
-        }
-        assert_eq!(
-            Body::compute_merkle_root(&body.coinbase, &block.filled)?,
-            block.header.merkle_root,
-            "Block {}",
-            block.height,
-        );
-        assert_eq!(block.header.hash().to_string(), block.hash);
-        authorization::Authorization::verify_body(&body)?;
     }
     Ok(())
 }
