@@ -31,7 +31,8 @@ pub use error::{
 };
 pub mod hashes;
 pub use hashes::{
-    BitName, BlockHash, Hash, M6id, MerkleRoot, NonZeroBitcoinBlockHash, Txid,
+    BitName, BlockHash, CoinbaseMerkleRoot, CoinbaseTxid, Hash, M6id,
+    MerkleRoot, NonZeroBitcoinBlockHash, OutputsMerkleRoot, Txid,
 };
 pub mod keys;
 pub use keys::{
@@ -81,6 +82,19 @@ pub struct Header {
 }
 
 impl Header {
+    pub fn compute_coinbase_txid(&self) -> CoinbaseTxid {
+        let Self {
+            merkle_root,
+            prev_side_hash,
+            prev_main_hash,
+        } = self;
+        Coinbase::compute_txid(
+            merkle_root,
+            prev_main_hash,
+            prev_side_hash.as_ref(),
+        )
+    }
+
     pub fn hash(&self) -> BlockHash {
         hashes::hash(self).into()
     }
@@ -431,6 +445,154 @@ pub struct TwoWayPegData {
     pub bundle_statuses: HashMap<M6id, WithdrawalBundleEvent>,
 }
 
+/// Hash to get a coinbase CBMT node commitment for a leaf value
+#[derive(Debug, BorshSerialize)]
+struct CoinbaseCbmtLeafPreCommitment<'a> {
+    #[borsh(serialize_with = "util::borsh::serialize::bitcoin_amount")]
+    value: bitcoin::Amount,
+    canonical_size: u64,
+    output: &'a Output,
+}
+
+/// Hash to get a coinbase CBMT node commitment for an internal node
+#[derive(Debug, BorshSerialize)]
+struct CoinbaseCbmtNodePreCommitment {
+    left_commitment: Hash,
+    #[borsh(serialize_with = "util::borsh::serialize::bitcoin_amount")]
+    value: bitcoin::Amount,
+    canonical_size: u64,
+    right_commitment: Hash,
+}
+
+/// Internal node of the coinbase CBMT
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CoinbaseCbmtNode {
+    commitment: Hash,
+    value: bitcoin::Amount,
+    canonical_size: u64,
+    /// CBT index. `CoinbaseCbmtNode` orders by this, and nothing else.
+    index: usize,
+}
+
+impl PartialOrd for CoinbaseCbmtNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CoinbaseCbmtNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.index.cmp(&other.index)
+    }
+}
+
+/// Marker type for merging coinbase branch commitments with value and
+/// canonical size totals.
+struct MergeValueSizeTotal;
+
+impl merkle_cbt::merkle_tree::Merge for MergeValueSizeTotal {
+    type Item = CoinbaseCbmtNode;
+
+    fn merge(lnode: &Self::Item, rnode: &Self::Item) -> Self::Item {
+        assert_eq!(lnode.index + 1, rnode.index);
+        let index = (lnode.index - 1) / 2;
+        let value = lnode.value + rnode.value;
+        let canonical_size = lnode.canonical_size + rnode.canonical_size;
+        let commitment =
+            hashes::hash_with_scratch_buffer(&CoinbaseCbmtNodePreCommitment {
+                left_commitment: lnode.commitment,
+                value,
+                canonical_size,
+                right_commitment: rnode.commitment,
+            });
+        CoinbaseCbmtNode {
+            commitment,
+            value,
+            canonical_size,
+            index,
+        }
+    }
+}
+
+/// Complete binary merkle tree over coinbase outputs
+type CoinbaseCbmt = merkle_cbt::CBMT<CoinbaseCbmtNode, MergeValueSizeTotal>;
+
+/// Coinbase transaction of a block
+#[derive(
+    BorshSerialize, Clone, Debug, Default, Deserialize, Serialize, ToSchema,
+)]
+pub struct Coinbase {
+    #[serde(with = "util::serde::hexstr_human_readable")]
+    #[schema(value_type = String)]
+    pub memo: Vec<u8>,
+    pub outputs: Vec<Output>,
+}
+
+impl Coinbase {
+    /// Commitment to every output, with the value and the canonical size
+    /// totalled at each branch.
+    fn compute_outputs_merkle_root(&self) -> OutputsMerkleRoot {
+        let n_outputs = self.outputs.len();
+        let leaves: Vec<CoinbaseCbmtNode> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                let value = output.get_value();
+                let canonical_size = output.canonical_size();
+                let commitment = hashes::hash_with_scratch_buffer(
+                    &CoinbaseCbmtLeafPreCommitment {
+                        value,
+                        canonical_size,
+                        output,
+                    },
+                );
+                CoinbaseCbmtNode {
+                    commitment,
+                    value,
+                    canonical_size,
+                    index: (index + n_outputs) - 1,
+                }
+            })
+            .collect();
+        let CoinbaseCbmtNode { commitment, .. } =
+            CoinbaseCbmt::build_merkle_root(leaves.as_slice());
+        commitment.into()
+    }
+
+    /// Commitment to the memo and the outputs
+    pub fn compute_merkle_root(&self) -> CoinbaseMerkleRoot {
+        let outputs_commitment = self.compute_outputs_merkle_root();
+        hashes::hash_with_scratch_buffer(&(&self.memo, outputs_commitment))
+            .into()
+    }
+
+    /// A coinbase txid hashes the merkle root of its block, the previous
+    /// mainchain hash, and the previous sidechain hash.
+    pub fn compute_txid(
+        merkle_root: &MerkleRoot,
+        prev_main_hash: &bitcoin::BlockHash,
+        prev_side_hash: Option<&BlockHash>,
+    ) -> CoinbaseTxid {
+        #[derive(BorshSerialize)]
+        struct HashComponents<'a> {
+            merkle_root: &'a MerkleRoot,
+            #[borsh(
+                serialize_with = "util::borsh::serialize::bitcoin_block_hash"
+            )]
+            prev_main_hash: &'a bitcoin::BlockHash,
+            prev_side_hash: Option<&'a BlockHash>,
+        }
+
+        hashes::hash_with_scratch_buffer(&HashComponents {
+            merkle_root,
+            prev_main_hash,
+            prev_side_hash,
+        })
+        .into()
+    }
+}
+
 // Internal node of a CBMT
 #[derive(Clone, Debug, Default, Eq, PartialEq, BorshSerialize)]
 struct CbmtNode {
@@ -512,7 +674,7 @@ type CbmtWithFeeTotal = merkle_cbt::CBMT<CbmtNode, MergeFeeSizeTotal>;
 
 #[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct Body {
-    pub coinbase: Vec<Output>,
+    pub coinbase: Coinbase,
     pub transactions: Vec<Transaction>,
     pub authorizations: Vec<Authorization>,
 }
@@ -520,7 +682,7 @@ pub struct Body {
 impl Body {
     pub fn new(
         authorized_transactions: Vec<AuthorizedTransaction>,
-        coinbase: Vec<Output>,
+        coinbase: Coinbase,
     ) -> Self {
         let mut authorizations = Vec::with_capacity(
             authorized_transactions
@@ -563,7 +725,7 @@ impl Body {
     }
 
     pub fn compute_merkle_root<FilledTx>(
-        coinbase: &[Output],
+        coinbase: &Coinbase,
         txs: &[FilledTx],
     ) -> Result<MerkleRoot, ComputeMerkleRootError>
     where
@@ -627,8 +789,7 @@ impl Body {
                 CbmtWithFeeTotal::build_merkle_root(leaves.as_slice())
             }
         };
-        // FIXME: Compute actual merkle root instead of just a hash.
-        let coinbase_root = hashes::hash_with_scratch_buffer(&coinbase);
+        let coinbase_root = coinbase.compute_merkle_root();
         // TODO: Should this include `total_fees`?
         let root =
             hashes::hash_with_scratch_buffer(&(coinbase_root, txs_root)).into();
@@ -697,15 +858,22 @@ impl Body {
     }
 
     pub fn get_outputs(
-        coinbase: &[Output],
+        coinbase: &Coinbase,
         txs: &[FilledTransaction],
+        prev_main_hash: &bitcoin::BlockHash,
+        prev_side_hash: Option<&BlockHash>,
     ) -> Result<Option<HashMap<OutPoint, Output>>, AmountOverflowError> {
         let mut outputs = HashMap::new();
         let merkle_root = Self::compute_merkle_root(coinbase, txs)
             .map_err(|_| AmountOverflowError)?;
-        for (vout, output) in coinbase.iter().enumerate() {
+        let txid = Coinbase::compute_txid(
+            &merkle_root,
+            prev_main_hash,
+            prev_side_hash,
+        );
+        for (vout, output) in coinbase.outputs.iter().enumerate() {
             let vout = vout as u32;
-            let outpoint = OutPoint::Coinbase { merkle_root, vout };
+            let outpoint = OutPoint::Coinbase { txid, vout };
             outputs.insert(outpoint, output.clone());
         }
         for transaction in txs {
@@ -723,6 +891,7 @@ impl Body {
         &self,
     ) -> Result<bitcoin::Amount, AmountOverflowError> {
         self.coinbase
+            .outputs
             .iter()
             .map(|output| output.get_value())
             .checked_sum()
@@ -955,7 +1124,7 @@ mod block_wire_shape {
                 prev_side_hash: None,
                 prev_main_hash: bitcoin::BlockHash::all_zeros(),
             },
-            body: Body::new(Vec::new(), Vec::new()),
+            body: Body::new(Vec::new(), Coinbase::default()),
             height: 0,
         };
         let json = serde_json::to_value(&block).unwrap();

@@ -6,7 +6,6 @@ hashes, signatures, Merkle roots, and block hashes from the old code.
 The transaction secret key contains 32 bytes with value 7.
 The state records use transaction ID `[9; 32]`, height 29, and sequence ID 7.
 
-`alphanet-v0.17.11.json` contains public seed blocks at heights 36 and 57.
-The `get_block` and `list_stxos` responses supply the blocks and spent outputs.
-The old code produced the Bincode body bytes and checked each Merkle root,
-header hash, and signature.
+The block level fixtures went away with the coinbase memo and the coinbase
+txid outpoints. Those changed every body byte, Merkle root, and block hash.
+The transaction level fixtures still hold.
