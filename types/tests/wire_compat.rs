@@ -1,6 +1,6 @@
 use anyhow::Context;
 use plain_bitnames_types::{
-    AuthorizedTransaction, FilledTransaction, authorization,
+    AuthorizedTransaction, FilledTransaction, VerifyingKey, authorization,
 };
 use serde::Deserialize;
 
@@ -10,8 +10,6 @@ struct LegacyCase {
     filled: FilledTransaction,
     canonical_hex: String,
     transaction_hex: String,
-    authorized_hex: String,
-    signature_hex: String,
     txid: String,
 }
 
@@ -60,29 +58,31 @@ fn legacy_update_bytes() -> anyhow::Result<()> {
 }
 
 #[test]
-fn legacy_registration_signatures() -> anyhow::Result<()> {
+fn registration_signatures() -> anyhow::Result<()> {
     check_transaction_signatures("registration_")
 }
 
 #[test]
-fn legacy_update_signatures() -> anyhow::Result<()> {
+fn update_signatures() -> anyhow::Result<()> {
     check_transaction_signatures("update_")
 }
 
 fn check_transaction_signatures(prefix: &str) -> anyhow::Result<()> {
-    let key = authorization::SigningKey::from_bytes(&[7; 32]);
+    let mut rng = rand::rng();
+    let ctxt = authorization::BatchVerificationContext::new(&mut rng);
+    let key = authorization::SigningKey::new(&mut rng);
+    let address = authorization::get_address(&VerifyingKey::from(&key));
     for case in cases(prefix)? {
-        let bytes = const_hex::decode(&case.authorized_hex)?;
-        let authorized: AuthorizedTransaction = bincode::deserialize(&bytes)?;
-        authorization::verify_authorized_transaction(&authorized)?;
-        assert_eq!(bincode::serialize(&authorized)?, bytes, "{}", case.name);
-        let signature = authorization::sign_tx(&key, &case.filled.transaction)?;
-        assert_eq!(
-            const_hex::encode(signature.0.to_bytes()),
-            case.signature_hex,
-            "{}",
-            case.name,
-        );
+        let transaction = case.filled.transaction;
+        let n_inputs = transaction.inputs.len();
+        let keys = vec![(address, &key); n_inputs];
+        let authorized =
+            authorization::authorize(&mut rng, &keys, transaction)?;
+        authorization::verify_authorized_transaction(&ctxt, &authorized)?;
+        let bytes = bincode::serialize(&authorized)?;
+        let decoded: AuthorizedTransaction = bincode::deserialize(&bytes)?;
+        assert_eq!(bincode::serialize(&decoded)?, bytes, "{}", case.name);
+        authorization::verify_authorized_transaction(&ctxt, &decoded)?;
     }
     Ok(())
 }

@@ -729,7 +729,7 @@ impl rpc_api::wallet::RpcServer for RpcServerImpl<true> {
     ) -> RpcResult<Signature> {
         self.app
             .wallet
-            .sign_arbitrary_msg(&verifying_key, &msg)
+            .sign_arbitrary_msg(rand::rng(), &verifying_key, &msg)
             .map_err(custom_err)
     }
 
@@ -740,7 +740,7 @@ impl rpc_api::wallet::RpcServer for RpcServerImpl<true> {
     ) -> RpcResult<Authorization> {
         self.app
             .wallet
-            .sign_arbitrary_msg_as_addr(&address, &msg)
+            .sign_arbitrary_msg_as_addr(rand::rng(), &address, &msg)
             .map_err(custom_err)
     }
 
@@ -749,8 +749,11 @@ impl rpc_api::wallet::RpcServer for RpcServerImpl<true> {
         transaction: plain_bitnames::types::Transaction,
         broadcast: Option<bool>,
     ) -> RpcResult<plain_bitnames::types::AuthorizedTransaction> {
-        let authorized =
-            self.app.wallet.authorize(transaction).map_err(custom_err)?;
+        let authorized = self
+            .app
+            .wallet
+            .authorize(rand::rng(), transaction)
+            .map_err(custom_err)?;
         if let Some(true) = broadcast {
             let () = self
                 .app

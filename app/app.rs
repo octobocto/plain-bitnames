@@ -306,6 +306,7 @@ impl App {
             config.network_magic_override,
             config.network,
             config.server_names.clone(),
+            &mut rand::rng(),
             &runtime,
             #[cfg(feature = "zmq")]
             config.zmq_addr,
@@ -359,7 +360,7 @@ impl App {
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
-        let authorized_transaction = self.wallet.authorize(tx)?;
+        let authorized_transaction = self.wallet.authorize(rand::rng(), tx)?;
         self.submit_transaction(&authorized_transaction)
     }
 

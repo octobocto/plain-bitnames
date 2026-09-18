@@ -9,13 +9,17 @@ blake3 = { workspace = true }
 borsh = { workspace = true, features = ["derive"] }
 clap = { workspace = true, features = ["derive"], optional = true }
 const-hex = { workspace = true, features = ["serde"] }
+curve25519-dalek = { workspace = true, features = ["serde"] }
 ed25519-bip32 = { workspace = true }
 educe = { workspace = true, features = ["Clone", "Debug"] }
+frost-core = { workspace = true, features = ["internals"] }
+frost-ristretto255 = { workspace = true, features = ["serde"] }
 generic-array = { workspace = true }
 heed = { workspace = true, optional = true }
 hex-literal = { workspace = true }
 merkle-cbt = { workspace = true }
 nonempty = { workspace = true, features = ["serialize"] }
+rand = { workspace = true, features = ["chacha"] }
 rayon = { workspace = true }
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
@@ -28,9 +32,8 @@ url = { workspace = true }
 utoipa = { workspace = true, features = ["macros", "non_strict_integers"] }
 x25519-dalek = { workspace = true, features = ["serde"] }
 
-[dependencies.ed25519-dalek]
-workspace = true
-features = ["batch", "digest", "hazmat", "serde"]
+[dev-dependencies]
+rand = { workspace = true, features = ["thread_rng"] }
 
 [dependencies.libes]
 workspace = true

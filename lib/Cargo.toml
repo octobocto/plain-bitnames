@@ -24,8 +24,8 @@ byteorder = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive"], optional = true }
 const-hex = { workspace = true, features = ["serde"] }
+curve25519-dalek = { workspace = true }
 ed25519-bip32 = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["hazmat"]}
 educe = { workspace = true, features = ["Clone", "Debug"] }
 error-fatality = { workspace = true }
 fallible-iterator = { workspace = true }
@@ -71,6 +71,7 @@ features = ["AES256-GCM", "ECIES-MAC", "HMAC-SHA256", "x25519"]
 
 [dev-dependencies]
 anyhow = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 temp-dir = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 

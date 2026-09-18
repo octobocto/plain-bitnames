@@ -25,6 +25,7 @@ use crate::{
         FilledTransaction, GetValue, Header, MainchainSyncProgress, Network,
         OutPoint, OutPointKey, SpentOutput, Tip, Transaction, TxIn, Txid,
         WithdrawalBundle,
+        authorization::{BatchVerificationContext, rand_core::CryptoRng},
         net::{Peer, PeerAddress, ResolvedPeerAddress},
         proto::{self, mainchain},
     },
@@ -48,6 +49,7 @@ pub type FilledTransactionWithPosition =
 #[derive(Clone)]
 pub struct Node<MainchainTransport = Channel> {
     archive: Archive,
+    batch_verification_ctxt: BatchVerificationContext,
     cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
@@ -67,7 +69,7 @@ where
     MainchainTransport: proto::Transport,
 {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub async fn new<R>(
         add_peers: HashSet<PeerAddress>,
         bind_addr: SocketAddr,
         datadir: &Path,
@@ -78,6 +80,7 @@ where
         magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
         network: Network,
         server_names: HashSet<String>,
+        rng: &mut R,
         runtime: &tokio::runtime::Runtime,
         #[cfg(feature = "zmq")] zmq_addr: SocketAddr,
     ) -> Result<Self, Error>
@@ -87,6 +90,7 @@ where
         <MainchainTransport as tonic::client::GrpcService<
             tonic::body::Body,
         >>::Future: Send,
+        R: CryptoRng,
 {
         let env_path = datadir.join("data.mdb");
         // let _ = std::fs::remove_dir_all(&env_path);
@@ -136,10 +140,12 @@ where
                 archive.clone(),
                 cusf_mainchain.clone(),
             );
+        let batch_verification_ctxt = BatchVerificationContext::new(rng);
         let (net, peer_info_rx, dial_known_peers_handle) = Net::new(
             runtime.handle(),
             &env,
             archive.clone(),
+            batch_verification_ctxt,
             magic_bytes_override,
             network,
             state.clone(),
@@ -164,6 +170,7 @@ where
         );
         Ok(Self {
             archive,
+            batch_verification_ctxt,
             cusf_mainchain,
             cusf_mainchain_wallet,
             _dial_known_peers: Arc::new(dial_known_peers_handle),
@@ -351,7 +358,11 @@ where
         let txid = transaction.transaction.txid();
         let transaction = {
             let mut rwtxn = self.env.write_txn()?;
-            self.state.validate_transaction(&rwtxn, transaction)?;
+            self.state.validate_transaction(
+                &rwtxn,
+                &self.batch_verification_ctxt,
+                transaction,
+            )?;
             let stored = self
                 .mempool
                 .transactions
@@ -588,7 +599,11 @@ where
             }
             if self
                 .state
-                .validate_transaction(&rwtxn, &transaction)
+                .validate_transaction(
+                    &rwtxn,
+                    &self.batch_verification_ctxt,
+                    &transaction,
+                )
                 .is_err()
             {
                 self.mempool

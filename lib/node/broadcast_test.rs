@@ -12,8 +12,10 @@ use sneed::DatabaseUnique;
 use super::{Error, Node};
 use crate::{
     types::{
-        AuthorizedTransaction, FilledOutput, Network, OutPoint, OutPointKey,
-        Transaction, Txid, proto::mainchain::ValidatorClient,
+        AuthorizedTransaction, FilledOutput, FilledTransaction, Network,
+        OutPoint, OutPointKey, Transaction, Txid,
+        authorization::{self, SigningKey},
+        proto::mainchain::ValidatorClient,
     },
     wallet::Wallet,
 };
@@ -36,6 +38,7 @@ pub(super) async fn node(
         None,
         Network::Regtest,
         HashSet::new(),
+        &mut rand::rng(),
         runtime,
         #[cfg(feature = "zmq")]
         (Ipv4Addr::LOCALHOST, 0).into(),
@@ -69,16 +72,19 @@ pub(super) fn transaction(
         utxos.put(&mut rwtxn, &OutPointKey::from(&outpoint), &output)?;
         rwtxn.commit()?;
     }
-    Ok(wallet.authorize(Transaction::new(
-        vec![outpoint],
-        vec![
-            FilledOutput::new_bitcoin_value(
-                address,
-                bitcoin::Amount::from_sat(900),
-            )
-            .into(),
-        ],
-    ))?)
+    Ok(wallet.authorize(
+        rand::rng(),
+        Transaction::new(
+            vec![outpoint],
+            vec![
+                FilledOutput::new_bitcoin_value(
+                    address,
+                    bitcoin::Amount::from_sat(900),
+                )
+                .into(),
+            ],
+        ),
+    )?)
 }
 
 pub(super) async fn wait_for_transaction(
@@ -102,12 +108,15 @@ fn mempool_restart_keeps_signed_bytes() -> anyhow::Result<()> {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../types/tests/fixtures/v0.17.11.json"
     ))?;
-    let bytes = const_hex::decode(
-        fixture["transactions"][0]["authorized_hex"]
-            .as_str()
-            .context("The fixture has no signed transaction")?,
-    )?;
-    let transaction: AuthorizedTransaction = bincode::deserialize(&bytes)?;
+    let filled: FilledTransaction =
+        serde_json::from_value(fixture["transactions"][0]["filled"].clone())?;
+    let mut rng = rand::rng();
+    let key = SigningKey::new(&mut rng);
+    let address = authorization::get_address(&(&key).into());
+    let keys = vec![(address, &key); filled.transaction.inputs.len()];
+    let transaction =
+        authorization::authorize(&mut rng, &keys, filled.transaction)?;
+    let bytes = bincode::serialize(&transaction)?;
     let txid = transaction.transaction.txid();
     let path = temp_dir::TempDir::new()?;
     for restart in [false, true] {
@@ -173,7 +182,7 @@ fn conflicting_inputs_and_invalid_signatures_fail() -> anyhow::Result<()> {
         let wallet = Wallet::new(&path.path().join("wallet"))?;
         let mut repeated_input = transaction.transaction.clone();
         repeated_input.inputs.push(repeated_input.inputs[0]);
-        let repeated_input = wallet.authorize(repeated_input)?;
+        let repeated_input = wallet.authorize(rand::rng(), repeated_input)?;
         assert!(matches!(
             node.broadcast_transaction(&repeated_input),
             Err(Error::MemPool(crate::mempool::Error::UtxoDoubleSpent))
@@ -181,16 +190,14 @@ fn conflicting_inputs_and_invalid_signatures_fail() -> anyhow::Result<()> {
         node.broadcast_transaction(&transaction)?;
         let mut conflict = transaction.transaction.clone();
         conflict.memo = vec![1];
-        let conflict = wallet.authorize(conflict)?;
+        let conflict = wallet.authorize(rand::rng(), conflict)?;
         assert!(matches!(
             node.broadcast_transaction(&conflict),
             Err(Error::MemPool(crate::mempool::Error::UtxoDoubleSpent))
         ));
         let mut invalid = transaction.clone();
         invalid.authorizations[0].signature =
-            crate::types::authorization::Signature(
-                ed25519_dalek::Signature::from_bytes(&[0; 64]),
-            );
+            conflict.authorizations[0].signature;
         assert!(matches!(
             node.broadcast_transaction(&invalid),
             Err(Error::State(_))
