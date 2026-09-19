@@ -21,7 +21,10 @@ use thiserror::Error;
 use tokio_stream::{StreamMap, wrappers::WatchStream};
 
 use crate::{
-    authorization::{self, Authorization, Signature, get_address},
+    authorization::{
+        self, Authorization, Signature, SigningKey, get_address,
+        rand_core::CryptoRng,
+    },
     types::{
         Address, AmountOverflowError, AuthorizedTransaction,
         BitcoinOutputContent, EncryptionPubKey, FilledOutput, GetValue, Hash,
@@ -38,6 +41,16 @@ pub use error::Error;
 
 mod util;
 use util::KnownBip32Path;
+
+fn signing_key_from_xprv(xprv: &XPrv) -> SigningKey {
+    let (secret_bytes, _) = xprv
+        .extended_secret_key_bytes()
+        .split_first_chunk::<32>()
+        .unwrap();
+    let scalar = curve25519_dalek::Scalar::from_bytes_mod_order(*secret_bytes);
+    SigningKey::from_scalar(scalar)
+        .expect("expected secret scalar to be non-zero")
+}
 
 #[derive(Debug, Error)]
 #[error("Message signature verification key {vk} does not exist")]
@@ -305,15 +318,11 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         index: u32,
-    ) -> Result<ed25519_dalek::hazmat::ExpandedSecretKey, error::GetMasterXprv>
-    {
+    ) -> Result<SigningKey, error::GetMasterXprv> {
         let master_xprv = self.get_master_xprv(rotxn)?;
         let derivation_path = KnownBip32Path::TxSigning { index }.into();
         let xpriv = util::derive_xprv(master_xprv, &derivation_path);
-        let esk_bytes = xpriv.extended_secret_key_bytes();
-        Ok(ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(
-            esk_bytes,
-        ))
+        Ok(signing_key_from_xprv(&xpriv))
     }
 
     /// Get the tx signing key that corresponds to the provided address
@@ -321,17 +330,14 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         address: &Address,
-    ) -> Result<ed25519_dalek::hazmat::ExpandedSecretKey, Error> {
+    ) -> Result<SigningKey, Error> {
         let addr_idx = self
             .address_to_index
             .try_get(rotxn, address)?
             .ok_or(Error::AddressDoesNotExist { address: *address })?;
         let signing_key = self.get_tx_signing_key(rotxn, addr_idx)?;
         // sanity check that signing key corresponds to address
-        {
-            let vk = ed25519_dalek::VerifyingKey::from(&signing_key);
-            assert_eq!(*address, get_address(&vk.into()));
-        }
+        assert_eq!(*address, get_address(&(&signing_key).into()));
         Ok(signing_key)
     }
 
@@ -339,15 +345,11 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         index: u32,
-    ) -> Result<ed25519_dalek::hazmat::ExpandedSecretKey, error::GetMasterXprv>
-    {
+    ) -> Result<SigningKey, error::GetMasterXprv> {
         let master_xprv = self.get_master_xprv(rotxn)?;
         let derivation_path = KnownBip32Path::MessageSigning { index }.into();
         let xpriv = util::derive_xprv(master_xprv, &derivation_path);
-        let esk_bytes = xpriv.extended_secret_key_bytes();
-        Ok(ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(
-            esk_bytes,
-        ))
+        Ok(signing_key_from_xprv(&xpriv))
     }
 
     /// Get the tx signing key that corresponds to the provided verifying key,
@@ -356,18 +358,13 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         vk: &VerifyingKey,
-    ) -> Result<Option<ed25519_dalek::hazmat::ExpandedSecretKey>, Error> {
+    ) -> Result<Option<SigningKey>, Error> {
         let Some(vk_idx) = self.vk_to_index.try_get(rotxn, vk)? else {
             return Ok(None);
         };
         let signing_key = self.get_message_signing_key(rotxn, vk_idx)?;
         // sanity check that signing key corresponds to vk
-        {
-            assert_eq!(
-                *vk,
-                ed25519_dalek::VerifyingKey::from(&signing_key).into()
-            );
-        }
+        assert_eq!(*vk, (&signing_key).into());
         Ok(Some(signing_key))
     }
 
@@ -376,7 +373,7 @@ impl Wallet {
         &self,
         rotxn: &RoTxn,
         vk: &VerifyingKey,
-    ) -> Result<ed25519_dalek::hazmat::ExpandedSecretKey, Error> {
+    ) -> Result<SigningKey, Error> {
         self.try_get_message_signing_key_for_vk(rotxn, vk)?
             .ok_or_else(|| error::VkDoesNotExist { vk: *vk }.into())
     }
@@ -391,8 +388,7 @@ impl Wallet {
             .map(|(idx, _)| idx + 1)
             .unwrap_or(0);
         let tx_signing_key = self.get_tx_signing_key(&txn, next_index)?;
-        let vk = ed25519_dalek::VerifyingKey::from(&tx_signing_key);
-        let address = get_address(&vk.into());
+        let address = get_address(&(&tx_signing_key).into());
         self.index_to_address.put(&mut txn, &next_index, &address)?;
         self.address_to_index.put(&mut txn, &address, &next_index)?;
         txn.commit()?;
@@ -462,7 +458,7 @@ impl Wallet {
             .map(|(idx, _)| idx + 1)
             .unwrap_or(0);
         let signing_key = self.get_message_signing_key(&txn, next_index)?;
-        let vk = ed25519_dalek::VerifyingKey::from(&signing_key).into();
+        let vk = (&signing_key).into();
         self.index_to_vk.put(&mut txn, &next_index, &vk)?;
         self.vk_to_index.put(&mut txn, &vk, &next_index)?;
         txn.commit()?;
@@ -690,7 +686,7 @@ impl Wallet {
         let name_hash: Hash = blake3::hash(plain_name.as_bytes()).into();
         let bitname = BitName(name_hash);
         let reservation_hmac_key =
-            blake3::hash(reservation_signing_key.scalar.as_bytes()).into();
+            blake3::hash(reservation_signing_key.to_scalar().as_bytes()).into();
         let nonce =
             blake3::keyed_hash(&reservation_hmac_key, &name_hash).into();
         // hmac(nonce, name_hash)
@@ -758,9 +754,10 @@ impl Wallet {
                 let rotxn = self.env.read_txn()?;
                 let reservation_signing_key = self
                     .get_tx_signing_key_for_addr(&rotxn, &reservation_addr)?;
-                let reservation_hmac_key =
-                    blake3::hash(reservation_signing_key.scalar.as_bytes())
-                        .into();
+                let reservation_hmac_key = blake3::hash(
+                    reservation_signing_key.to_scalar().as_bytes(),
+                )
+                .into();
                 let nonce =
                     blake3::keyed_hash(&reservation_hmac_key, &name_hash)
                         .into();
@@ -977,10 +974,14 @@ impl Wallet {
         Ok(addresses)
     }
 
-    pub fn authorize(
+    pub fn authorize<R>(
         &self,
+        mut rng: R,
         transaction: Transaction,
-    ) -> Result<AuthorizedTransaction, Error> {
+    ) -> Result<AuthorizedTransaction, Error>
+    where
+        R: CryptoRng,
+    {
         let rotxn = self.env.read_txn()?;
         let mut authorizations = vec![];
         for input in &transaction.inputs {
@@ -995,13 +996,13 @@ impl Wallet {
                     address: spent_utxo.address,
                 })?;
             let tx_signing_key = self.get_tx_signing_key(&rotxn, index)?;
-            let signature = crate::authorization::sign_tx_esk(
+            let signature = crate::authorization::sign_tx(
+                &mut rng,
                 &tx_signing_key,
                 &transaction,
             )?;
-            let vk = ed25519_dalek::VerifyingKey::from(&tx_signing_key);
             authorizations.push(Authorization {
-                verifying_key: vk.into(),
+                verifying_key: (&tx_signing_key).into(),
                 signature,
             });
         }
@@ -1034,30 +1035,37 @@ impl Wallet {
         Ok(res)
     }
 
-    pub fn sign_arbitrary_msg(
+    pub fn sign_arbitrary_msg<R>(
         &self,
+        rng: R,
         verifying_key: &VerifyingKey,
         msg: &str,
-    ) -> Result<Signature, Error> {
-        use authorization::{Dst, sign_esk};
+    ) -> Result<Signature, Error>
+    where
+        R: CryptoRng,
+    {
+        use authorization::{Dst, sign};
         let rotxn = self.env.read_txn()?;
         let signing_key =
             self.get_message_signing_key_for_vk(&rotxn, verifying_key)?;
-        let res = sign_esk(&signing_key, Dst::Arbitrary, msg.as_bytes());
+        let res = sign(rng, &signing_key, Dst::Arbitrary, msg.as_bytes());
         Ok(res)
     }
 
-    pub fn sign_arbitrary_msg_as_addr(
+    pub fn sign_arbitrary_msg_as_addr<R>(
         &self,
+        rng: R,
         address: &Address,
         msg: &str,
-    ) -> Result<Authorization, Error> {
-        use authorization::{Dst, sign_esk};
+    ) -> Result<Authorization, Error>
+    where
+        R: CryptoRng,
+    {
+        use authorization::{Dst, sign};
         let rotxn = self.env.read_txn()?;
         let signing_key = self.get_tx_signing_key_for_addr(&rotxn, address)?;
-        let signature = sign_esk(&signing_key, Dst::Arbitrary, msg.as_bytes());
-        let verifying_key =
-            ed25519_dalek::VerifyingKey::from(&signing_key).into();
+        let signature = sign(rng, &signing_key, Dst::Arbitrary, msg.as_bytes());
+        let verifying_key = (&signing_key).into();
         Ok(Authorization {
             verifying_key,
             signature,
@@ -1173,12 +1181,10 @@ mod test {
         let chain_utxos = wallet.get_utxos()?;
         let value = bitcoin::Amount::from_sat(1000);
         let fee = bitcoin::Amount::from_sat(100);
-        let first = wallet.authorize(wallet.create_transfer(
-            Address([1; 20]),
-            value,
-            fee,
-            None,
-        )?)?;
+        let first = wallet.authorize(
+            rand::rng(),
+            wallet.create_transfer(Address([1; 20]), value, fee, None)?,
+        )?;
         let mut rwtxn = env.write_txn()?;
         pool.put(&mut rwtxn, &first)?;
         rwtxn.commit()?;
@@ -1186,12 +1192,10 @@ mod test {
         let next_wallet = wallet.clone();
         wallet.put_utxos(&chain_utxos)?;
         wallet.set_pending_transactions(&pool.take_all(&*env.read_txn()?)?);
-        let second = next_wallet.authorize(next_wallet.create_transfer(
-            Address([2; 20]),
-            value,
-            fee,
-            None,
-        )?)?;
+        let second = next_wallet.authorize(
+            rand::rng(),
+            next_wallet.create_transfer(Address([2; 20]), value, fee, None)?,
+        )?;
         assert!(
             first
                 .transaction
@@ -1217,12 +1221,10 @@ mod test {
         let chain_utxos = wallet.get_utxos()?;
         let value = bitcoin::Amount::from_sat(1000);
         let fee = bitcoin::Amount::from_sat(100);
-        let first = wallet.authorize(wallet.create_transfer(
-            Address([1; 20]),
-            value,
-            fee,
-            None,
-        )?)?;
+        let first = wallet.authorize(
+            rand::rng(),
+            wallet.create_transfer(Address([1; 20]), value, fee, None)?,
+        )?;
         let mut rwtxn = env.write_txn()?;
         pool.put(&mut rwtxn, &first)?;
         rwtxn.commit()?;

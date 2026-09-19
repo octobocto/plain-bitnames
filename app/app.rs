@@ -18,8 +18,8 @@ use plain_bitnames::{
         proto::mainchain::{
             self,
             generated::{
-                mining_service_server, validator_service_server,
-                wallet_service_server,
+                block_producer_service_server, mining_service_server,
+                validator_service_server, wallet_service_server,
             },
         },
     },
@@ -93,6 +93,7 @@ fn update(
 }
 
 struct ProtoSupport {
+    block_producer: bool,
     miner: bool,
     wallet: bool,
 }
@@ -182,6 +183,8 @@ impl App {
     ) -> Result<ProtoSupport, tonic::Status> {
         let mut health_client = HealthClient::new(transport);
 
+        let block_producer_service_name =
+            block_producer_service_server::SERVICE_NAME;
         let mining_service_name = mining_service_server::SERVICE_NAME;
         let validator_service_name = validator_service_server::SERVICE_NAME;
         let wallet_service_name = wallet_service_server::SERVICE_NAME;
@@ -198,7 +201,12 @@ impl App {
         }
         tracing::info!("Verified existence of {}", validator_service_name);
 
-        // The mining and wallet services are optional.
+        // The block producer, mining and wallet services are optional.
+        let has_block_producer_service = Self::check_status_serving(
+            &mut health_client,
+            block_producer_service_name,
+        )
+        .await?;
         let has_mining_service =
             Self::check_status_serving(&mut health_client, mining_service_name)
                 .await?;
@@ -206,13 +214,16 @@ impl App {
             Self::check_status_serving(&mut health_client, wallet_service_name)
                 .await?;
         tracing::info!(
+            %has_block_producer_service,
             %has_mining_service,
             %has_wallet_service,
-            "Checked existence of {}, {}",
+            "Checked existence of {}, {}, {}",
+            block_producer_service_name,
             mining_service_name,
             wallet_service_name,
         );
         let res = ProtoSupport {
+            block_producer: has_block_producer_service,
             miner: has_mining_service,
             wallet: has_wallet_service,
         };
@@ -266,12 +277,20 @@ impl App {
         .unwrap()
         .concurrency_limit(256)
         .connect_lazy();
-        let (cusf_mainchain, cusf_mainchain_miner, cusf_mainchain_wallet) = {
-            let ProtoSupport { miner, wallet } =
-                runtime.block_on(Self::wait_for_proto_support(
-                    transport.clone(),
-                    &config.mainchain_grpc_url,
-                ));
+        let (
+            cusf_mainchain,
+            cusf_mainchain_miner,
+            cusf_mainchain_wallet,
+            cusf_mainchain_block_producer,
+        ) = {
+            let ProtoSupport {
+                block_producer,
+                miner,
+                wallet,
+            } = runtime.block_on(Self::wait_for_proto_support(
+                transport.clone(),
+                &config.mainchain_grpc_url,
+            ));
             let mining_client = if miner {
                 Some(mainchain::MiningClient::new(transport.clone()))
             } else {
@@ -282,8 +301,18 @@ impl App {
             } else {
                 None
             };
+            let block_producer_client = if block_producer {
+                Some(mainchain::BlockProducerClient::new(transport.clone()))
+            } else {
+                None
+            };
             let validator_client = mainchain::ValidatorClient::new(transport);
-            (validator_client, mining_client, wallet_client)
+            (
+                validator_client,
+                mining_client,
+                wallet_client,
+                block_producer_client,
+            )
         };
         let miner = cusf_mainchain_wallet
             .clone()
@@ -302,10 +331,11 @@ impl App {
             config.net_addr,
             &config.datadir,
             cusf_mainchain,
-            cusf_mainchain_wallet,
+            cusf_mainchain_block_producer,
             config.network_magic_override,
             config.network,
             config.server_names.clone(),
+            &mut rand::rng(),
             &runtime,
             #[cfg(feature = "zmq")]
             config.zmq_addr,
@@ -359,7 +389,7 @@ impl App {
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
-        let authorized_transaction = self.wallet.authorize(tx)?;
+        let authorized_transaction = self.wallet.authorize(rand::rng(), tx)?;
         self.submit_transaction(&authorized_transaction)
     }
 

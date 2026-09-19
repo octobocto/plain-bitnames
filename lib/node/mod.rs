@@ -25,6 +25,7 @@ use crate::{
         FilledTransaction, GetValue, Header, MainchainSyncProgress, Network,
         OutPoint, OutPointKey, SpentOutput, Tip, Transaction, TxIn, Txid,
         WithdrawalBundle,
+        authorization::{BatchVerificationContext, rand_core::CryptoRng},
         net::{Peer, PeerAddress, ResolvedPeerAddress},
         proto::{self, mainchain},
     },
@@ -48,9 +49,10 @@ pub type FilledTransactionWithPosition =
 #[derive(Clone)]
 pub struct Node<MainchainTransport = Channel> {
     archive: Archive,
+    batch_verification_ctxt: BatchVerificationContext,
     cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
-    cusf_mainchain_wallet:
-        Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
+    cusf_mainchain_block_producer:
+        Option<Arc<Mutex<mainchain::BlockProducerClient<MainchainTransport>>>>,
     _dial_known_peers: Arc<DialKnownPeersHandle>,
     env: sneed::Env<heed::WithoutTls>,
     mainchain_task: MainchainTaskHandle,
@@ -67,17 +69,18 @@ where
     MainchainTransport: proto::Transport,
 {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub async fn new<R>(
         add_peers: HashSet<PeerAddress>,
         bind_addr: SocketAddr,
         datadir: &Path,
         cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
-        cusf_mainchain_wallet: Option<
-            mainchain::WalletClient<MainchainTransport>,
+        cusf_mainchain_block_producer: Option<
+            mainchain::BlockProducerClient<MainchainTransport>,
         >,
         magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
         network: Network,
         server_names: HashSet<String>,
+        rng: &mut R,
         runtime: &tokio::runtime::Runtime,
         #[cfg(feature = "zmq")] zmq_addr: SocketAddr,
     ) -> Result<Self, Error>
@@ -87,6 +90,7 @@ where
         <MainchainTransport as tonic::client::GrpcService<
             tonic::body::Body,
         >>::Future: Send,
+        R: CryptoRng,
 {
         let env_path = datadir.join("data.mdb");
         // let _ = std::fs::remove_dir_all(&env_path);
@@ -136,10 +140,12 @@ where
                 archive.clone(),
                 cusf_mainchain.clone(),
             );
+        let batch_verification_ctxt = BatchVerificationContext::new(rng);
         let (net, peer_info_rx, dial_known_peers_handle) = Net::new(
             runtime.handle(),
             &env,
             archive.clone(),
+            batch_verification_ctxt,
             magic_bytes_override,
             network,
             state.clone(),
@@ -147,8 +153,8 @@ where
             add_peers,
             server_names,
         )?;
-        let cusf_mainchain_wallet =
-            cusf_mainchain_wallet.map(|wallet| Arc::new(Mutex::new(wallet)));
+        let cusf_mainchain_block_producer = cusf_mainchain_block_producer
+            .map(|block_producer| Arc::new(Mutex::new(block_producer)));
         let net_task = NetTaskHandle::new(
             runtime,
             env.clone(),
@@ -164,8 +170,9 @@ where
         );
         Ok(Self {
             archive,
+            batch_verification_ctxt,
             cusf_mainchain,
-            cusf_mainchain_wallet,
+            cusf_mainchain_block_producer,
             _dial_known_peers: Arc::new(dial_known_peers_handle),
             env,
             mainchain_task,
@@ -351,7 +358,11 @@ where
         let txid = transaction.transaction.txid();
         let transaction = {
             let mut rwtxn = self.env.write_txn()?;
-            self.state.validate_transaction(&rwtxn, transaction)?;
+            self.state.validate_transaction(
+                &rwtxn,
+                &self.batch_verification_ctxt,
+                transaction,
+            )?;
             let stored = self
                 .mempool
                 .transactions
@@ -588,7 +599,11 @@ where
             }
             if self
                 .state
-                .validate_transaction(&rwtxn, &transaction)
+                .validate_transaction(
+                    &rwtxn,
+                    &self.batch_verification_ctxt,
+                    &transaction,
+                )
                 .is_err()
             {
                 self.mempool
@@ -905,19 +920,27 @@ where
             ));
             self.zmq_pub_handler.tx.unbounded_send(zmq_msg).unwrap();
         }
-        if let Some((bundle, _)) = bundle
-            && let Some(cusf_mainchain_wallet) =
-                self.cusf_mainchain_wallet.as_ref()
-        {
+        if let Some((bundle, _)) = bundle {
             let m6id = bundle.compute_m6id();
+            if let Some(cusf_mainchain_block_producer) =
+                self.cusf_mainchain_block_producer.as_ref()
             {
-                let mut cusf_mainchain_wallet_lock =
-                    cusf_mainchain_wallet.lock().await;
-                let () = cusf_mainchain_wallet_lock
-                    .broadcast_withdrawal_bundle(bundle.tx())
-                    .await?;
+                {
+                    let mut cusf_mainchain_block_producer_lock =
+                        cusf_mainchain_block_producer.lock().await;
+                    let () = cusf_mainchain_block_producer_lock
+                        .propose_withdrawal_bundle(bundle.tx())
+                        .await?;
+                }
+                tracing::trace!(%m6id, "Proposed withdrawal bundle");
+            } else {
+                tracing::warn!(
+                    %m6id,
+                    "Withdrawal bundle is pending, but the mainchain node \
+                     does not serve BlockProducerService, so the bundle \
+                     cannot be proposed and the withdrawal cannot complete",
+                );
             }
-            tracing::trace!(%m6id, "Broadcast withdrawal bundle");
         }
         Ok(true)
     }

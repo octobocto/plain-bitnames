@@ -74,14 +74,17 @@ pub(crate) mod borsh {
             BorshSerialize::serialize(&(txid_bytes, vout), writer)
         }
 
-        pub fn ed25519_vk<W>(
-            vk: &ed25519_dalek::VerifyingKey,
+        pub fn verifying_key<W>(
+            vk: &frost_ristretto255::VerifyingKey,
             writer: &mut W,
         ) -> borsh::io::Result<()>
         where
             W: borsh::io::Write,
         {
-            BorshSerialize::serialize(vk.as_bytes(), writer)
+            BorshSerialize::serialize(
+                vk.to_element().compress().as_bytes(),
+                writer,
+            )
         }
 
         pub fn x25519_pubkey<W>(

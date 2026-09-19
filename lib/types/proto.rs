@@ -1006,6 +1006,39 @@ pub mod mainchain {
 
     #[derive(Clone, Debug)]
     #[repr(transparent)]
+    pub struct BlockProducerClient<T>(
+        pub generated::block_producer_service_client::BlockProducerServiceClient<T>,
+    );
+
+    impl<T> BlockProducerClient<T>
+    where
+        T: super::Transport,
+    {
+        pub fn new(inner: T) -> Self {
+            Self(generated::block_producer_service_client::BlockProducerServiceClient::<T>::new(inner))
+        }
+
+        /// Send a withdrawal bundle to the block producer, which proposes it
+        /// as an M3.
+        pub async fn propose_withdrawal_bundle(
+            &mut self,
+            transaction: &Transaction,
+        ) -> Result<(), super::Error> {
+            let request = generated::ProposeWithdrawalBundleRequest {
+                sidechain_id: Some(THIS_SIDECHAIN as u32),
+                transaction: Some(bitcoin::consensus::serialize(transaction)),
+            };
+            let generated::ProposeWithdrawalBundleResponse {} = self
+                .0
+                .propose_withdrawal_bundle(request)
+                .await?
+                .into_inner();
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    #[repr(transparent)]
     pub struct MiningClient<T>(
         pub generated::mining_service_client::MiningServiceClient<T>,
     );
@@ -1259,26 +1292,6 @@ pub mod mainchain {
                     inner,
                 ),
             )
-        }
-
-        pub async fn broadcast_withdrawal_bundle(
-            &mut self,
-            transaction: &Transaction,
-        ) -> Result<(), super::Error> {
-            let request = generated::BroadcastWithdrawalBundleRequest {
-                sidechain_id: Some(THIS_SIDECHAIN as u32),
-                transaction: Some(bitcoin::consensus::serialize(transaction)),
-            };
-            #[expect(
-                deprecated,
-                reason = "the enforcer keeps this RPC as an alias for BlockProducerService.ProposeWithdrawalBundle"
-            )]
-            let generated::BroadcastWithdrawalBundleResponse {} = self
-                .0
-                .broadcast_withdrawal_bundle(request)
-                .await?
-                .into_inner();
-            Ok(())
         }
 
         pub async fn create_bmm_critical_data_tx(

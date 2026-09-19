@@ -9,3 +9,8 @@ The state records use transaction ID `[9; 32]`, height 29, and sequence ID 7.
 The block level fixtures went away with the coinbase memo and the coinbase
 txid outpoints. Those changed every body byte, Merkle root, and block hash.
 The transaction level fixtures still hold.
+
+The move to schnorrkel changed the fixtures in two ways. The signature records
+hold ed25519 signatures, so no test reads them now. The signing key in the
+`registration_full` records is now the Ristretto basepoint. Bincode writes that
+key without a length prefix, and the transaction ID of that case changed.

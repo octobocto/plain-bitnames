@@ -38,6 +38,7 @@ use crate::{
     state::{self, State},
     types::{
         BmmResult, Body, Header, Tip,
+        authorization::BatchVerificationContext,
         net::ResolvedPeerAddress,
         proto::mainchain::{self, Event as MainchainBlockEvent},
     },
@@ -83,9 +84,11 @@ impl ZmqPubHandler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn connect_tip_(
     rwtxn: &mut RwTxn<'_>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     header: &Header,
@@ -95,11 +98,13 @@ fn connect_tip_(
     let block_hash = header.hash();
     if tracing::enabled!(tracing::Level::DEBUG) {
         let height = state.try_get_height(rwtxn)?;
-        let () = state.apply_block(rwtxn, header, body)?;
+        let () =
+            state.apply_block(rwtxn, batch_verification_ctxt, header, body)?;
         tracing::debug!(?height, %block_hash,
                             "connected body")
     } else {
-        let () = state.apply_block(rwtxn, header, body)?;
+        let () =
+            state.apply_block(rwtxn, batch_verification_ctxt, header, body)?;
     }
     let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data)?;
     let () = archive.put_header(rwtxn, header)?;
@@ -222,6 +227,7 @@ fn is_fatal_reorg_error(err: &Error) -> bool {
 fn reorg_to_tip<ThreadLocalStorage>(
     env: &sneed::Env<ThreadLocalStorage>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     #[cfg(feature = "zmq")] zmq_pub_handler: &ZmqPubHandler,
@@ -352,6 +358,7 @@ fn reorg_to_tip<ThreadLocalStorage>(
         let () = match connect_tip_(
             &mut rwtxn,
             archive,
+            batch_verification_ctxt,
             mempool,
             state,
             header,
@@ -491,7 +498,11 @@ impl NetTask {
             let mut rwtxn = ctxt.env.write_txn()?;
             let mut valid = Vec::new();
             for transaction in ctxt.mempool.take_all(&rwtxn)? {
-                match ctxt.state.validate_transaction(&rwtxn, &transaction) {
+                match ctxt.state.validate_transaction(
+                    &rwtxn,
+                    &ctxt.net.batch_verification_ctxt,
+                    &transaction,
+                ) {
                     Ok(_) => valid.push(transaction),
                     Err(
                         err @ (state::Error::Db(_)
@@ -945,6 +956,7 @@ impl NetTask {
             let _: bool = reorg_to_tip(
                 &ctxt.env,
                 &ctxt.archive,
+                &ctxt.net.batch_verification_ctxt,
                 &ctxt.mempool,
                 &ctxt.state,
                 #[cfg(feature = "zmq")]
@@ -1222,6 +1234,7 @@ impl NetTask {
                         reorg_to_tip(
                             &self.ctxt.env,
                             &self.ctxt.archive,
+                            &self.ctxt.net.batch_verification_ctxt,
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             #[cfg(feature = "zmq")]
@@ -1623,6 +1636,7 @@ mod peer_retry_test {
             None,
             Network::Regtest,
             HashSet::new(),
+            &mut rand::rng(),
             runtime,
             #[cfg(feature = "zmq")]
             (Ipv4Addr::LOCALHOST, 0).into(),
@@ -1681,6 +1695,7 @@ mod peer_retry_test {
                 runtime.handle(),
                 &sender.env,
                 sender.archive.clone(),
+                sender.batch_verification_ctxt,
                 None,
                 Network::Regtest,
                 sender.state.clone(),
@@ -1790,8 +1805,12 @@ mod peer_retry_test {
                         .into(),
                     ],
                 );
-                let tx = wallet.authorize(tx)?;
-                node.state.validate_transaction(&rwtxn, &tx)?;
+                let tx = wallet.authorize(rand::rng(), tx)?;
+                node.state.validate_transaction(
+                    &rwtxn,
+                    &node.batch_verification_ctxt,
+                    &tx,
+                )?;
                 Ok(tx)
             };
             let first_tx = make_tx(vec![inputs[0]], 900)?;
