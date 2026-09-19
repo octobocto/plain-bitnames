@@ -167,16 +167,11 @@ const SIGNET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
 };
 
 const BETANET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
-    // The betanet servers run a node for this chain.
-    const DRIVECHA_IN: PeerAddress<&'static str> = PeerAddress {
-        host: url::Host::Domain("seed.beta.ecash.drivecha.in"),
+    const ECASH_EU_COM: PeerAddress<&'static str> = PeerAddress {
+        host: url::Host::Domain("seed.beta.ecash.eu.com"),
         port: DEFAULT_PORT,
     };
-    const ECASH_NINJA: PeerAddress<&'static str> = PeerAddress {
-        host: url::Host::Domain("seed.beta.ecash.ninja"),
-        port: DEFAULT_PORT,
-    };
-    &[DRIVECHA_IN, ECASH_NINJA]
+    &[ECASH_EU_COM]
 };
 
 const FORKNET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
