@@ -953,7 +953,7 @@ impl NetTask {
                 block_hash: best_side_tip.block_hash,
                 main_block_hash: best_side_tip.info.main_block_hash,
             };
-            let _: bool = reorg_to_tip(
+            match reorg_to_tip(
                 &ctxt.env,
                 &ctxt.archive,
                 &ctxt.net.batch_verification_ctxt,
@@ -962,7 +962,19 @@ impl NetTask {
                 #[cfg(feature = "zmq")]
                 &ctxt.zmq_pub_handler,
                 best_side_tip,
-            )?;
+            ) {
+                Ok(_) => (),
+                Err(err) if is_fatal_reorg_error(&err) => return Err(err),
+                // The archive names this tip, so no peer is left to drop. The
+                // node keeps the tip it holds, and the net task runs on.
+                Err(err) => {
+                    tracing::warn!(
+                        ?best_side_tip,
+                        err = format!("{:#}", ErrorChain::new(&err)),
+                        "rejecting an invalid side tip"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1571,6 +1583,7 @@ mod test {
     use crate::{
         node::net_task::{Error, is_fatal_reorg_error},
         state,
+        types::Txid,
     };
 
     // a peer's invalid block (value out > value in) must not be fatal
@@ -1584,6 +1597,19 @@ mod test {
     #[test]
     fn infrastructure_error_is_fatal() {
         assert!(is_fatal_reorg_error(&Error::PeerInfoRxClosed));
+    }
+
+    // a block that names a reservation the state does not hold reaches the net
+    // task from the archive, with no peer to drop. It must not be fatal: a
+    // dead net task answers every later connect_block with "receiver is gone".
+    #[test]
+    fn missing_reservation_is_not_fatal() {
+        let err = Error::State(Box::new(state::Error::BitName(
+            state::error::BitName::MissingReservation {
+                txid: Txid::default(),
+            },
+        )));
+        assert!(!is_fatal_reorg_error(&err));
     }
 
     #[tokio::test(start_paused = true)]
