@@ -24,6 +24,7 @@ use crate::{
         BmmResult, Body, FilledOutput, FilledTransaction, GetValue, Header,
         Network, OutPoint, OutPointKey, SpentOutput, Tip, Transaction, TxIn,
         Txid, WithdrawalBundle,
+        authorization::{BatchVerificationContext, rand_core::CryptoRng},
         net::Peer,
         proto::{self, mainchain},
     },
@@ -45,6 +46,7 @@ pub type FilledTransactionWithPosition =
 #[derive(Clone)]
 pub struct Node<MainchainTransport = Channel> {
     archive: Archive,
+    batch_verification_ctxt: BatchVerificationContext,
     cusf_mainchain: Arc<Mutex<mainchain::ValidatorClient<MainchainTransport>>>,
     cusf_mainchain_wallet:
         Option<Arc<Mutex<mainchain::WalletClient<MainchainTransport>>>>,
@@ -63,7 +65,7 @@ where
     MainchainTransport: proto::Transport,
 {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub async fn new<R>(
         bind_addr: SocketAddr,
         datadir: &Path,
         cusf_mainchain: mainchain::ValidatorClient<MainchainTransport>,
@@ -72,6 +74,7 @@ where
         >,
         magic_bytes_override: Option<crate::net::peer_message::MagicBytes>,
         network: Network,
+        rng: &mut R,
         runtime: &tokio::runtime::Runtime,
         #[cfg(feature = "zmq")] zmq_addr: SocketAddr,
     ) -> Result<Self, Error>
@@ -81,6 +84,7 @@ where
         <MainchainTransport as tonic::client::GrpcService<
             tonic::body::Body,
         >>::Future: Send,
+        R: CryptoRng,
 {
         let env_path = datadir.join("data.mdb");
         // let _ = std::fs::remove_dir_all(&env_path);
@@ -130,9 +134,11 @@ where
                 archive.clone(),
                 cusf_mainchain.clone(),
             );
+        let batch_verification_ctxt = BatchVerificationContext::new(rng);
         let (net, peer_info_rx) = Net::new(
             &env,
             archive.clone(),
+            batch_verification_ctxt,
             magic_bytes_override,
             network,
             state.clone(),
@@ -155,6 +161,7 @@ where
         );
         Ok(Self {
             archive,
+            batch_verification_ctxt,
             cusf_mainchain: Arc::new(Mutex::new(cusf_mainchain)),
             cusf_mainchain_wallet,
             env,
@@ -300,7 +307,11 @@ where
     ) -> Result<(), Error> {
         {
             let mut rwtxn = self.env.write_txn()?;
-            self.state.validate_transaction(&rwtxn, transaction)?;
+            self.state.validate_transaction(
+                &rwtxn,
+                &self.batch_verification_ctxt,
+                transaction,
+            )?;
             self.mempool.put(&mut rwtxn, transaction)?;
             rwtxn.commit().map_err(RwTxnError::from)?;
         }
@@ -488,7 +499,11 @@ where
             }
             if self
                 .state
-                .validate_transaction(&rwtxn, &transaction)
+                .validate_transaction(
+                    &rwtxn,
+                    &self.batch_verification_ctxt,
+                    &transaction,
+                )
                 .is_err()
             {
                 self.mempool

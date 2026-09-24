@@ -101,24 +101,24 @@ impl Serialize for EncryptionPubKey {
     }
 }
 
-/// Wrapper around x25519 pubkeys
-#[derive(BorshSerialize, Clone, Copy, Debug, Eq, Hash, PartialEq, ToSchema)]
+/// Wrapper around ristretto255 verifying keys
+#[derive(BorshSerialize, Clone, Copy, Debug, Eq, PartialEq, ToSchema)]
 #[repr(transparent)]
 #[schema(value_type = String)]
 pub struct VerifyingKey(
-    #[borsh(serialize_with = "util::borsh::serialize::ed25519_vk")]
-    pub  ed25519_dalek::VerifyingKey,
+    #[borsh(serialize_with = "util::borsh::serialize::verifying_key")]
+    pub  frost_ristretto255::VerifyingKey,
 );
 
 impl VerifyingKey {
     /// HRP for Bech32m encoding
     const BECH32M_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("bn-svk");
 
-    const BYTE_LEN: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
+    pub const BYTE_LEN: usize = 32;
 
     /// Encode to Bech32m format
     pub fn bech32m_encode(&self) -> String {
-        bech32::encode::<bech32::Bech32m>(Self::BECH32M_HRP, self.0.as_bytes())
+        bech32::encode::<bech32::Bech32m>(Self::BECH32M_HRP, &self.to_bytes())
             .expect("Bech32m Encoding should not fail")
     }
 
@@ -141,7 +141,7 @@ impl VerifyingKey {
                 });
             }
         };
-        let res = match ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
+        let res = match frost_ristretto255::VerifyingKey::deserialize(&bytes) {
             Ok(vk) => Self(vk),
             Err(err) => {
                 let err = error::Bech32mDecode::InvalidBytes {
@@ -158,7 +158,16 @@ impl VerifyingKey {
     }
 
     pub fn to_bytes(&self) -> [u8; Self::BYTE_LEN] {
-        self.0.to_bytes()
+        self.0.to_element().compress().to_bytes()
+    }
+}
+
+impl std::hash::Hash for VerifyingKey {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        self.to_bytes().hash(state)
     }
 }
 
@@ -168,25 +177,31 @@ impl std::fmt::Display for VerifyingKey {
     }
 }
 
-impl From<ed25519_dalek::VerifyingKey> for VerifyingKey {
-    fn from(vk: ed25519_dalek::VerifyingKey) -> Self {
+impl From<frost_ristretto255::VerifyingKey> for VerifyingKey {
+    fn from(vk: frost_ristretto255::VerifyingKey) -> Self {
         Self(vk)
     }
 }
 
-impl From<VerifyingKey> for ed25519_dalek::VerifyingKey {
+impl From<VerifyingKey> for frost_ristretto255::VerifyingKey {
     fn from(vk: VerifyingKey) -> Self {
         vk.0
     }
 }
 
+impl From<&frost_ristretto255::SigningKey> for VerifyingKey {
+    fn from(sk: &frost_ristretto255::SigningKey) -> Self {
+        Self(frost_ristretto255::VerifyingKey::from(sk))
+    }
+}
+
 impl TryFrom<&[u8; VerifyingKey::BYTE_LEN]> for VerifyingKey {
-    type Error = ed25519_dalek::SignatureError;
+    type Error = frost_ristretto255::Error;
 
     fn try_from(
         bytes: &[u8; VerifyingKey::BYTE_LEN],
     ) -> Result<Self, Self::Error> {
-        ed25519_dalek::VerifyingKey::from_bytes(bytes).map(Self)
+        frost_ristretto255::VerifyingKey::deserialize(bytes).map(Self)
     }
 }
 
@@ -205,7 +220,7 @@ impl<'de> Deserialize<'de> for VerifyingKey {
     {
         serde_with::IfIsHumanReadable::<
             DisplayFromStr,
-            FromInto<ed25519_dalek::VerifyingKey>,
+            FromInto<frost_ristretto255::VerifyingKey>,
         >::deserialize_as(deserializer)
     }
 }
@@ -217,7 +232,7 @@ impl Serialize for VerifyingKey {
     {
         serde_with::IfIsHumanReadable::<
             DisplayFromStr,
-            FromInto<ed25519_dalek::VerifyingKey>,
+            FromInto<frost_ristretto255::VerifyingKey>,
         >::serialize_as(self, serializer)
     }
 }

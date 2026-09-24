@@ -380,7 +380,7 @@ pub enum TransactionData {
         bitname_data: Box<MutableBitNameData>,
     },
     BitNameUpdate(Box<BitNameDataUpdates>),
-    BatchIcann(BatchIcannRegistrationData),
+    BatchIcann(Box<BatchIcannRegistrationData>),
 }
 
 pub type TxData = TransactionData;

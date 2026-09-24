@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use crate::{
     state::{Error, PrevalidatedBlock, State, error},
     types::{
-        AmountOverflowError, Authorization, Body, FilledOutput,
-        FilledOutputContent, FilledTransaction, GetAddress as _, GetValue as _,
-        Header, InPoint, MerkleRoot, OutPoint, OutPointKey, OutputContent,
-        SpentOutput, TxData, Verify as _,
+        AmountOverflowError, Body, FilledOutput, FilledOutputContent,
+        FilledTransaction, GetAddress as _, GetValue as _, Header, InPoint,
+        MerkleRoot, OutPoint, OutPointKey, OutputContent, SpentOutput, TxData,
+        authorization::{self, BatchVerificationContext},
     },
 };
 
@@ -21,6 +21,7 @@ fn calculate_total_inputs(body: &Body) -> usize {
 
 /// Validate a block, returning the merkle root and fees
 pub fn validate(
+    batch_verification_ctxt: &BatchVerificationContext,
     state: &State,
     rotxn: &RoTxn,
     header: &Header,
@@ -115,7 +116,9 @@ pub fn validate(
             return Err(Error::WrongPubKeyForAddress);
         }
     }
-    if Authorization::verify_body(body).is_err() {
+    if authorization::verify_authorizations(batch_verification_ctxt, body)
+        .is_err()
+    {
         return Err(Error::AuthorizationError);
     }
     Ok((total_fees, merkle_root))
@@ -124,6 +127,7 @@ pub fn validate(
 /// Prevalidate a block, returning a PrevalidatedBlock with computed values
 /// to avoid redundant computation during connection
 pub fn prevalidate(
+    batch_verification_ctxt: &BatchVerificationContext,
     state: &State,
     rotxn: &RoTxn,
     header: &Header,
@@ -221,7 +225,9 @@ pub fn prevalidate(
             return Err(Error::WrongPubKeyForAddress);
         }
     }
-    if Authorization::verify_body(body).is_err() {
+    if authorization::verify_authorizations(batch_verification_ctxt, body)
+        .is_err()
+    {
         return Err(Error::AuthorizationError);
     }
     let height = state.try_get_height(rotxn)?.map_or(0, |height| height + 1);
@@ -375,13 +381,15 @@ pub fn connect_prevalidated(
 /// Apply a block by combining validation and connection in a single transaction
 /// This avoids the double B-tree traversal and reduces LMDB commit overhead
 pub fn apply_block(
+    batch_verification_ctxt: &BatchVerificationContext,
     state: &State,
     rwtxn: &mut RwTxn,
     header: &Header,
     body: &Body,
 ) -> Result<(), Error> {
     // Prevalidate the block using the same transaction
-    let prevalidated = prevalidate(state, rwtxn, header, body)?;
+    let prevalidated =
+        prevalidate(batch_verification_ctxt, state, rwtxn, header, body)?;
 
     // Connect the block using precomputed values
     let _merkle_root =
@@ -656,7 +664,7 @@ mod test {
     use bitcoin::hashes::Hash as _;
 
     use crate::{
-        authorization::{self, SigningKey},
+        authorization::{self, BatchVerificationContext, SigningKey},
         state::{
             block::{connect, disconnect_tip, validate},
             test::fresh_state,
@@ -695,8 +703,10 @@ mod test {
     fn disconnect_bitname_data_update() -> anyhow::Result<()> {
         let (_temp_dir, env, state) =
             fresh_state("disconnect_bitname_data_update")?;
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let verifying_key = signing_key.verifying_key().into();
+        let mut rng = rand::rng();
+        let batch_verification_ctxt = BatchVerificationContext::new(&mut rng);
+        let signing_key = SigningKey::new(&mut rng);
+        let verifying_key = (&signing_key).into();
         let address = authorization::get_address(&verifying_key);
 
         let name_hash: Hash = [1; 32];
@@ -788,8 +798,11 @@ mod test {
             let rotxn = env.read_txn()?;
             state.fill_transaction(&rotxn, &update_tx)?
         };
-        let authorized_update =
-            authorization::authorize(&[(address, &signing_key)], update_tx)?;
+        let authorized_update = authorization::authorize(
+            &mut rng,
+            &[(address, &signing_key)],
+            update_tx,
+        )?;
         let update_body = Body::new(vec![authorized_update], Vec::new());
         let update_merkle_root =
             Body::compute_merkle_root(&[], &[filled_update_tx])?;
@@ -798,7 +811,13 @@ mod test {
 
         {
             let rotxn = env.read_txn()?;
-            validate(&state, &rotxn, &update_header, &update_body)?;
+            validate(
+                &batch_verification_ctxt,
+                &state,
+                &rotxn,
+                &update_header,
+                &update_body,
+            )?;
         }
         {
             let mut rwtxn = env.write_txn()?;

@@ -18,6 +18,7 @@ use crate::{
     state::State,
     types::{
         AuthorizedTransaction, Network, THIS_SIDECHAIN, VERSION, Version,
+        authorization::BatchVerificationContext,
         net::{Peer, PeerConnectionStatus},
     },
     util::ErrorChain,
@@ -187,6 +188,7 @@ const fn seed_node_addrs(network: Network) -> &'static [SocketAddr] {
 pub struct Net {
     pub server: Endpoint,
     archive: Archive,
+    pub(crate) batch_verification_ctxt: BatchVerificationContext,
     magic_bytes: peer_message::MagicBytes,
     state: State,
     active_peers: Arc<RwLock<HashMap<SocketAddr, PeerConnectionHandle>>>,
@@ -281,6 +283,7 @@ impl Net {
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: self.archive.clone(),
+            batch_verification_ctxt: self.batch_verification_ctxt,
             magic_bytes: self.magic_bytes,
             state: self.state.clone(),
         };
@@ -317,6 +320,7 @@ impl Net {
     pub fn new(
         env: &sneed::Env<heed::WithoutTls>,
         archive: Archive,
+        batch_verification_ctxt: BatchVerificationContext,
         magic_bytes_override: Option<peer_message::MagicBytes>,
         network: Network,
         state: State,
@@ -348,6 +352,7 @@ impl Net {
         let net = Net {
             server,
             archive,
+            batch_verification_ctxt,
             magic_bytes,
             state,
             active_peers,
@@ -447,6 +452,7 @@ impl Net {
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: self.archive.clone(),
+            batch_verification_ctxt: self.batch_verification_ctxt,
             magic_bytes: self.magic_bytes,
             state: self.state.clone(),
         };
