@@ -22,6 +22,7 @@ use crate::{
     transfer_many::transfer_many_trial,
     unknown_withdrawal::unknown_withdrawal_trial,
     util::BinPaths,
+    wallet_sync::wallet_sync_trial,
 };
 
 #[allow(clippy::significant_drop_tightening, reason = "false positive")]
@@ -213,6 +214,11 @@ pub fn tests(
             file_registry.clone(),
             failure_collector.clone(),
         ),
-        unknown_withdrawal_trial(bin_paths, file_registry, failure_collector),
+        unknown_withdrawal_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
+        wallet_sync_trial(bin_paths, file_registry, failure_collector),
     ]
 }
